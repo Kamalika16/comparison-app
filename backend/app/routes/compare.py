@@ -1,19 +1,31 @@
 import json
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
 from ..config import UPLOAD_DIR, OUTPUT_DIR
-from ..services.excel_loader import load_records
+from ..services.excel_loader import (
+    detect_hours_column,
+    find_numeric_columns,
+    get_columns,
+    load_records,
+)
+from ..services.hours_comparator import (
+    compare_records,
+    compare_within_file,
+    datasets_equivalent,
+)
 from ..services.llm_comparator import compare_via_llm
 from ..services.report_writer import write_report
 
 router = APIRouter(prefix="/api", tags=["compare"])
 
-ALLOWED_EXT = {".xlsx", ".xls"}
+ALLOWED_EXT = {".xlsx", ".xls", ".csv"}
 
 
 def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
@@ -26,10 +38,27 @@ def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
     return dest
 
 
+@router.post("/columns")
+async def detect_columns(file: UploadFile = File(...)):
+    """Read an uploaded Excel file just to discover its column headers,
+    so the UI can offer them as primary-identifier candidates."""
+    path = _save_upload(file, UPLOAD_DIR)
+    try:
+        columns = get_columns(str(path))
+    except Exception as e:
+        raise HTTPException(400, f"Could not read columns from '{file.filename}': {e}")
+    finally:
+        path.unlink(missing_ok=True)
+
+    return {"filename": file.filename, "columns": columns}
+
+
 @router.post("/compare")
 async def compare(
     attendance_file: UploadFile = File(...),
     client_file: UploadFile = File(...),
+    attendance_key_column: Optional[str] = Form(None),
+    client_key_column: Optional[str] = Form(None),
 ):
     att_path = _save_upload(attendance_file, UPLOAD_DIR)
     cli_path = _save_upload(client_file, UPLOAD_DIR)
@@ -37,9 +66,71 @@ async def compare(
     try:
         att_records = load_records(str(att_path))
         cli_records = load_records(str(cli_path))
-        result = compare_via_llm(att_records, cli_records)
+
+        if attendance_key_column and client_key_column:
+            # Deterministic path: match on the selected identifier columns and
+            # compare each employee's pre-calculated Total Hours number
+            # directly. No LLM involvement in matching or hours handling.
+            meta = {
+                "attendance_key_column": attendance_key_column,
+                "client_key_column": client_key_column,
+                "attendance_hours_column": None,
+                "client_hours_column": None,
+            }
+            try:
+                equivalent = datasets_equivalent(
+                    att_records, cli_records,
+                    attendance_key_column, client_key_column)
+                numeric_cols = (
+                    find_numeric_columns(att_records,
+                                         exclude=[attendance_key_column])
+                    if equivalent else None
+                )
+                if equivalent and len(numeric_cols) == 2:
+                    # Special case: the uploads are two copies of the SAME
+                    # dataset and its table carries two Total Hours columns.
+                    # Compare those two columns within File 1's records — the
+                    # files are not treated as separate employee sources.
+                    meta["attendance_hours_column"] = numeric_cols[0]
+                    meta["client_hours_column"] = numeric_cols[1]
+                    result = compare_within_file(
+                        att_records,
+                        attendance_key_column,
+                        numeric_cols[0],
+                        numeric_cols[1],
+                    )
+                else:
+                    att_hours_column = detect_hours_column(
+                        att_records, exclude=[attendance_key_column])
+                    cli_hours_column = detect_hours_column(
+                        cli_records, exclude=[client_key_column])
+                    meta["attendance_hours_column"] = att_hours_column
+                    meta["client_hours_column"] = cli_hours_column
+                    result = compare_records(
+                        att_records,
+                        cli_records,
+                        attendance_key_column,
+                        client_key_column,
+                        att_hours_column,
+                        cli_hours_column,
+                    )
+            except ValueError as e:
+                # Ambiguous/missing hours column, non-numeric hours cell, etc.
+                raise HTTPException(400, str(e))
+        else:
+            # Legacy callers without selected columns keep the previous
+            # LLM-based behaviour unchanged.
+            meta = None
+            result = compare_via_llm(
+                att_records,
+                cli_records,
+                attendance_key_column=attendance_key_column,
+                client_key_column=client_key_column,
+            )
     except json.JSONDecodeError:
         raise HTTPException(502, "The AI did not return valid JSON. Please try again.")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Comparison failed: {e}")
     finally:
@@ -56,7 +147,7 @@ async def compare(
     report_id = uuid.uuid4().hex
     report_path = OUTPUT_DIR / f"{report_id}.xlsx"
     try:
-        write_report(result, str(report_path))
+        write_report(result, str(report_path), meta=meta)
     except Exception as e:
         raise HTTPException(500, f"Report generation failed: {e}. Raw result: {result}")
 
@@ -69,8 +160,9 @@ async def download_report(report_id: str):
     path = OUTPUT_DIR / f"{report_id}.xlsx"
     if not path.exists():
         raise HTTPException(404, "Report not found or has expired.")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="comparison_report.xlsx",
+        filename=f"hours_comparison_report_{stamp}.xlsx",
     )

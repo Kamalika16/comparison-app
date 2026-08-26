@@ -7,6 +7,12 @@ export default function SummaryCards({ summary }) {
     { label: "Mismatches", value: summary.mismatches, tone: "bad" },
   ];
 
+  // Surfaced straight from the backend summary so reviewers can see at a
+  // glance how many records need manual reconciliation.
+  if (typeof summary.review_required === "number") {
+    cards.push({ label: "Needs Review", value: summary.review_required, tone: "warn" });
+  }
+
   return (
     <div className="summary-cards">
       {cards.map((c) => (
