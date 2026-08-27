@@ -62,7 +62,7 @@ jobs:
           nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
           sleep 3
           cat backend.log
-          npx --yes wait-on http://127.0.0.1:8000/api/health --timeout 60000
+          curl --fail http://127.0.0.1:8000/api/health
 
       - name: Install frontend dependencies
         working-directory: frontend
