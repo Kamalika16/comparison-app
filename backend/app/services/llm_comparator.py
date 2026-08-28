@@ -14,7 +14,7 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 MASTER_PROMPT = (Path(__file__).parent.parent / "prompts" / "master_prompt.txt").read_text()
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-MAX_RECORDS_PER_BATCH = 12
+MAX_RECORDS_PER_BATCH =  5
 
 # The Groq client is created LAZILY. The primary (deterministic) comparison
 # path never uses it, so a missing or invalid GROQ_API_KEY must not stop the
