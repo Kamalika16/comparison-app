@@ -6,8 +6,25 @@ these tests go through the real HTTP surface: FastAPI's TestClient drives
 actual requests through CORS middleware, multipart parsing, routing, and
 the route handlers in app/routes/compare.py exactly as a real client would.
 
-No live server or network access is required - TestClient runs the ASGI
-app in-process. Run with:
+/api/compare now always routes through compare_via_llm() (see
+app/routes/compare.py). These tests mock that function rather than calling
+the real Groq API, on purpose:
+
+  * LLM output is not guaranteed identical between runs, so real calls make
+    assertions flaky in a way that has nothing to do with whether our code
+    is correct.
+  * Real calls cost tokens and are subject to rate limits -- undesirable on
+    every push/PR in CI (see .github/workflows/tests.yml, which does not
+    provide a GROQ_API_KEY).
+  * These tests exist to verify OUR code -- upload handling, validation,
+    temp-file cleanup, report generation, the download endpoint -- not to
+    verify Groq's model quality.
+
+A small number of tests near the bottom are marked as live integration
+tests and are skipped unless GROQ_API_KEY is set, so you can still run a
+real end-to-end check by hand when you want one.
+
+No live server or network access is required for the mocked tests. Run with:
 
     cd backend
     source .venv/bin/activate      # or your own venv
@@ -16,7 +33,9 @@ app in-process. Run with:
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +58,46 @@ def _upload_tuple(path: Path):
         path.read_bytes(),
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+# A fixed, known-good response standing in for whatever compare_via_llm()
+# would normally return. Matches the schema report_writer.write_report()
+# and the frontend both expect: summary + mismatches, each mismatch using
+# company_hours / client_hours (never invented -- None when a side has no
+# record, exactly like the real comparator's contract).
+FAKE_LLM_RESULT = {
+    "summary": {
+        "total_records_compared": 3,
+        "matches": 1,
+        "mismatches": 2,
+    },
+    "mismatches": [
+        {
+            "id": "H285491",
+            "name": "Abdul Hakeem Habeeb Rahman",
+            "company_hours": 176,
+            "client_hours": 72,
+            "classification": "Hours mismatch",
+            "severity": "HIGH",
+            "reason": "iLink total 176 vs Client total 72 - difference 104",
+            "recommendation": "Reconcile the logged hours with the client.",
+        },
+        {
+            "id": "H324723",
+            "name": "Abbas Ali Pathan",
+            "company_hours": 29.7,
+            "client_hours": None,
+            "classification": "Only in iLink Attendance",
+            "severity": "MEDIUM",
+            "reason": "Employee present only in iLink Attendance (total 29.7).",
+            "recommendation": "Confirm whether work was billed to the client.",
+        },
+    ],
+}
+
+
+def _mock_compare_via_llm(*args, **kwargs):
+    return FAKE_LLM_RESULT
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +151,13 @@ def test_columns_requires_the_file_field():
 
 
 # ---------------------------------------------------------------------------
-# POST /api/compare -- deterministic path (both key columns supplied)
+# POST /api/compare -- LLM path, compare_via_llm() mocked out (see module
+# docstring for why). These tests verify OUR route/plumbing code: request
+# handling, response shape, report generation, cleanup -- not the model.
 # ---------------------------------------------------------------------------
 
-def test_compare_deterministic_happy_path_returns_report_id():
+@patch("app.routes.compare.compare_via_llm", side_effect=_mock_compare_via_llm)
+def test_compare_happy_path_returns_report_id(mock_llm):
     resp = client.post(
         "/api/compare",
         files={
@@ -111,71 +173,42 @@ def test_compare_deterministic_happy_path_returns_report_id():
     body = resp.json()
 
     assert "summary" in body and "mismatches" in body and "report_id" in body
-    # Internal consistency: summary counts should reconcile with the
-    # mismatches list length, independent of exactly what the numbers are.
     summary = body["summary"]
     mismatch_count = len(body["mismatches"])
     assert summary["mismatches"] == mismatch_count
     if "total_records_compared" in summary:
         assert summary["matches"] + summary["mismatches"] == summary["total_records_compared"]
 
-    # This is the deterministic path -- no LLM call, so it must be fast and
-    # must not have silently fallen back to the LLM comparator.
     for m in body["mismatches"]:
         assert m["severity"] in {"HIGH", "MEDIUM", "LOW"}
 
+    # Confirm we actually went through the (mocked) LLM path, not some
+    # other code path, and that the route passed the key columns through.
+    mock_llm.assert_called_once()
+    _, kwargs = mock_llm.call_args
+    assert kwargs["attendance_key_column"] == "Employee Name"
+    assert kwargs["client_key_column"] == "Full Name"
 
-def test_compare_swapped_key_columns_still_matches_by_value_not_name():
-    """The two identifier columns are allowed to have completely different
-    names -- matching happens on cell VALUES, not on the column headers
-    matching each other. This test pins that contract."""
+
+@patch("app.routes.compare.compare_via_llm", side_effect=_mock_compare_via_llm)
+def test_compare_works_without_key_columns_too(mock_llm):
+    """The LLM path doesn't require key columns to be pre-selected -- it can
+    be called with neither, unlike the old deterministic path."""
     resp = client.post(
         "/api/compare",
         files={
             "attendance_file": _upload_tuple(ATTENDANCE_XLSX),
             "client_file": _upload_tuple(CLIENT_XLSX),
         },
-        data={
-            "attendance_key_column": "Employee Name",  # different header...
-            "client_key_column": "Full Name",           # ...same underlying values
-        },
+        data={},
     )
     assert resp.status_code == 200
     body = resp.json()
-    # All 5 employees appear in both fixtures -> nobody should show up as
-    # "missing" purely because the column names differ.
-    missing_reasons = [
-        m for m in body["mismatches"]
-        if m.get("company_hours") is None or m.get("client_hours") is None
-    ]
-    assert missing_reasons == []
+    assert "summary" in body and "mismatches" in body and "report_id" in body
 
 
-def test_compare_rejects_ambiguous_hours_column():
-    """If the non-identifier columns aren't exactly one fully-numeric
-    column, the app must refuse to guess (see excel_loader.detect_hours_column)."""
-    resp = client.post(
-        "/api/compare",
-        files={
-            "attendance_file": _upload_tuple(ATTENDANCE_XLSX),
-            "client_file": _upload_tuple(CLIENT_XLSX),
-        },
-        data={
-            # "Date" is not numeric and "Hours Worked" is -- picking "Date"
-            # as the identifier leaves exactly one numeric column, which is
-            # fine. Instead, force ambiguity by excluding nothing useful:
-            # select a key column that IS the numeric column, so both
-            # remaining columns ("Employee Name", "Date") are non-numeric
-            # and detect_hours_column finds zero numeric candidates.
-            "attendance_key_column": "Hours Worked",
-            "client_key_column": "Billable Hours",
-        },
-    )
-    assert resp.status_code == 400
-    assert "numeric" in resp.json()["detail"].lower()
-
-
-def test_compare_rejects_disallowed_extension_on_either_file():
+@patch("app.routes.compare.compare_via_llm", side_effect=_mock_compare_via_llm)
+def test_compare_rejects_disallowed_extension_on_either_file(mock_llm):
     resp = client.post(
         "/api/compare",
         files={
@@ -189,9 +222,11 @@ def test_compare_rejects_disallowed_extension_on_either_file():
     )
     assert resp.status_code == 400
     assert "not an Excel file" in resp.json()["detail"]
+    mock_llm.assert_not_called()
 
 
-def test_compare_cleans_up_temp_uploads_after_request():
+@patch("app.routes.compare.compare_via_llm", side_effect=_mock_compare_via_llm)
+def test_compare_cleans_up_temp_uploads_after_request(mock_llm):
     """Regression guard for the finally-block cleanup in routes/compare.py:
     uploads must never accumulate on disk across requests."""
     from app.config import UPLOAD_DIR
@@ -212,11 +247,35 @@ def test_compare_cleans_up_temp_uploads_after_request():
     assert after == (before - {UPLOAD_DIR / ".gitkeep"})
 
 
+@patch(
+    "app.routes.compare.compare_via_llm",
+    side_effect=lambda *a, **k: {"unexpected": "shape"},
+)
+def test_compare_rejects_malformed_llm_response(mock_llm):
+    """If the LLM (or whatever's standing in for it) returns JSON that
+    doesn't have the summary/mismatches shape we need, the route must fail
+    loudly with a 502 rather than silently passing garbage to the report
+    writer or the frontend."""
+    resp = client.post(
+        "/api/compare",
+        files={
+            "attendance_file": _upload_tuple(ATTENDANCE_XLSX),
+            "client_file": _upload_tuple(CLIENT_XLSX),
+        },
+        data={
+            "attendance_key_column": "Employee Name",
+            "client_key_column": "Full Name",
+        },
+    )
+    assert resp.status_code == 502
+
+
 # ---------------------------------------------------------------------------
 # GET /api/reports/{report_id}/download
 # ---------------------------------------------------------------------------
 
-def test_download_report_after_successful_compare():
+@patch("app.routes.compare.compare_via_llm", side_effect=_mock_compare_via_llm)
+def test_download_report_after_successful_compare(mock_llm):
     compare_resp = client.post(
         "/api/compare",
         files={
@@ -261,7 +320,6 @@ def test_oversized_upload_is_not_currently_rejected():
     A file well over that limit is still accepted and processed."""
     from app.config import MAX_UPLOAD_SIZE
 
-    # A valid, parseable CSV that is nonetheless bigger than MAX_UPLOAD_SIZE.
     header = "id,hours\n"
     row = "1,8\n"
     padding_rows_needed = (MAX_UPLOAD_SIZE // len(row)) + 100
@@ -272,7 +330,35 @@ def test_oversized_upload_is_not_currently_rejected():
         "/api/columns",
         files={"file": ("huge.csv", oversized_csv, "text/csv")},
     )
-    # Documents current behavior: accepted and successfully processed
-    # despite exceeding MAX_UPLOAD_SIZE -- there is no size check today.
     assert resp.status_code == 200
     assert resp.json()["columns"] == ["id", "hours"]
+
+
+# ---------------------------------------------------------------------------
+# Live integration test -- hits the REAL Groq API. Skipped by default; only
+# runs if you explicitly set GROQ_API_KEY in your shell before running
+# pytest. Use this by hand occasionally to sanity-check the real
+# integration; do not rely on it in CI (costs tokens, rate-limited, and
+# GROQ_API_KEY is intentionally not configured in
+# .github/workflows/tests.yml).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not os.getenv("GROQ_API_KEY"),
+    reason="GROQ_API_KEY not set -- skipping real Groq API call",
+)
+def test_compare_real_llm_integration_smoke_test():
+    resp = client.post(
+        "/api/compare",
+        files={
+            "attendance_file": _upload_tuple(ATTENDANCE_XLSX),
+            "client_file": _upload_tuple(CLIENT_XLSX),
+        },
+        data={
+            "attendance_key_column": "Employee Name",
+            "client_key_column": "Full Name",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "summary" in body and "mismatches" in body and "report_id" in body
