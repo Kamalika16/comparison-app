@@ -9,17 +9,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
 from ..config import UPLOAD_DIR, OUTPUT_DIR
-from ..services.excel_loader import (
-    detect_hours_column,
-    find_numeric_columns,
-    get_columns,
-    load_records,
-)
-from ..services.hours_comparator import (
-    compare_records,
-    compare_within_file,
-    datasets_equivalent,
-)
+from ..services.excel_loader import get_columns, load_records
 from ..services.llm_comparator import compare_via_llm
 from ..services.report_writer import write_report
 
@@ -67,66 +57,23 @@ async def compare(
         att_records = load_records(str(att_path))
         cli_records = load_records(str(cli_path))
 
-        if attendance_key_column and client_key_column:
-            # Deterministic path: match on the selected identifier columns and
-            # compare each employee's pre-calculated Total Hours number
-            # directly. No LLM involvement in matching or hours handling.
-            meta = {
-                "attendance_key_column": attendance_key_column,
-                "client_key_column": client_key_column,
-                "attendance_hours_column": None,
-                "client_hours_column": None,
-            }
-            try:
-                equivalent = datasets_equivalent(
-                    att_records, cli_records,
-                    attendance_key_column, client_key_column)
-                numeric_cols = (
-                    find_numeric_columns(att_records,
-                                         exclude=[attendance_key_column])
-                    if equivalent else None
-                )
-                if equivalent and len(numeric_cols) == 2:
-                    # Special case: the uploads are two copies of the SAME
-                    # dataset and its table carries two Total Hours columns.
-                    # Compare those two columns within File 1's records — the
-                    # files are not treated as separate employee sources.
-                    meta["attendance_hours_column"] = numeric_cols[0]
-                    meta["client_hours_column"] = numeric_cols[1]
-                    result = compare_within_file(
-                        att_records,
-                        attendance_key_column,
-                        numeric_cols[0],
-                        numeric_cols[1],
-                    )
-                else:
-                    att_hours_column = detect_hours_column(
-                        att_records, exclude=[attendance_key_column])
-                    cli_hours_column = detect_hours_column(
-                        cli_records, exclude=[client_key_column])
-                    meta["attendance_hours_column"] = att_hours_column
-                    meta["client_hours_column"] = cli_hours_column
-                    result = compare_records(
-                        att_records,
-                        cli_records,
-                        attendance_key_column,
-                        client_key_column,
-                        att_hours_column,
-                        cli_hours_column,
-                    )
-            except ValueError as e:
-                # Ambiguous/missing hours column, non-numeric hours cell, etc.
-                raise HTTPException(400, str(e))
-        else:
-            # Legacy callers without selected columns keep the previous
-            # LLM-based behaviour unchanged.
-            meta = None
-            result = compare_via_llm(
-                att_records,
-                cli_records,
-                attendance_key_column=attendance_key_column,
-                client_key_column=client_key_column,
-            )
+        # LLM path: always let the model match employees and compare their
+        # Total Hours, regardless of whether key columns were selected. The
+        # deterministic path (compare_records / compare_within_file in
+        # hours_comparator.py) is kept in the codebase but is no longer
+        # called from this route.
+        meta = {
+            "attendance_key_column": attendance_key_column,
+            "client_key_column": client_key_column,
+            "attendance_hours_column": None,
+            "client_hours_column": None,
+        } if (attendance_key_column or client_key_column) else None
+        result = compare_via_llm(
+            att_records,
+            cli_records,
+            attendance_key_column=attendance_key_column,
+            client_key_column=client_key_column,
+        )
     except json.JSONDecodeError:
         raise HTTPException(502, "The AI did not return valid JSON. Please try again.")
     except HTTPException:
