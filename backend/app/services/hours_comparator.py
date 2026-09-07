@@ -49,24 +49,30 @@ def _fmt(value) -> str:
     """Format a number without trailing zeros: 184 -> '184', 128.5 -> '128.5'."""
     return f"{value:g}"
 
+def _fold_provided_total(entry: dict, raw_hours, sum_mode: bool = False) -> None:
+    """Accumulate one row's provided hours into the single entity already
+    indexed for its identifier.
 
-def _fold_provided_total(entry: dict, raw_hours) -> None:
-    """Accumulate one duplicate row's provided Total Hours into the single
-    entity already indexed for its identifier.
+    sum_mode=True (attendance side): every non-blank value found for this
+    identifier is ADDED together — this is the multi-row-per-day case,
+    where one employee legitimately has several attendance rows and we want
+    their total worked hours.
 
-    - Blank cells contribute nothing (and are never treated as zero).
-    - A value numerically equal to one already recorded (so 40, '40' and
-      40.0 all agree) is a duplicate COPY of the same data: ignored —
-      nothing is ever summed.
-    - A genuinely DIFFERENT value marks the entity's total as conflicted:
-      the usable total is withdrawn (set to None) rather than picking a
-      winner, and every distinct provided value is retained so results can
-      show exactly what the source rows contain. No hour value is changed
-      or invented here.
+    sum_mode=False (client side, default/unchanged): a value numerically
+    equal to one already recorded is a duplicate copy and is ignored; a
+    genuinely different value marks the entity as conflicted rather than
+    guessing which one is correct.
     """
     if _is_missing(raw_hours):
         return
     number = _as_number(raw_hours)
+
+    if sum_mode:
+        entry["provided_totals"].append((number, _plain(raw_hours)))
+        entry["hours"] = (entry["hours"] or 0) + number
+        entry["raw_hours"] = _fmt(entry["hours"])
+        return
+
     for prior_number, _ in entry["provided_totals"]:
         if prior_number == number:
             return
@@ -79,8 +85,7 @@ def _fold_provided_total(entry: dict, raw_hours) -> None:
         entry["hours"] = None
         entry["hours_conflict"] = True
 
-
-def _index_employees(records, key_column, hours_column, label) -> dict:
+def _index_employees(records, key_column, hours_column, label, sum_hours: bool = False) -> dict:
     """Group rows by normalized identifier into ONE entity per identifier.
     Rows repeating an identifier are folded together instead of being
     rejected: identical duplicate rows are copies of the same employee and
@@ -119,7 +124,7 @@ def _index_employees(records, key_column, hours_column, label) -> dict:
             if not entry["name"]:
                 entry["name"] = _display_name(record)
         entry["rows"].append(pos)
-        _fold_provided_total(entry, record.get(hours_column))
+        _fold_provided_total(entry, record.get(hours_column),sum_mode=sum_hours)
 
     for entry in employees.values():
         rows = entry["rows"]
@@ -154,6 +159,18 @@ def _mismatch(employee_id, employee_name, company_hours, client_hours,
         "recommendation": recommendation,
     }
 
+def _matched(employee_id, employee_name, company_hours, client_hours) -> dict:
+    return {
+        "employee_id": employee_id,
+        "employee_name": employee_name,
+        "company_attendance_status": "Present",
+        "company_hours": company_hours,
+        "client_hours": client_hours,
+        "classification": "MATCH",
+        "severity": "MATCH",
+        "reason": "Hours match — no discrepancy.",
+        "recommendation": "",
+    }
 
 def compare_records(att_records, cli_records, att_key_column, cli_key_column,
                     att_hours_column, cli_hours_column) -> dict:
@@ -164,11 +181,12 @@ def compare_records(att_records, cli_records, att_key_column, cli_key_column,
     ``_index_employees``): identical copies count once and conflicting
     totals surface as a single review record per identifier."""
     att = _index_employees(att_records, att_key_column, att_hours_column,
-                           "iLink Attendance")
+                       "iLink Attendance", sum_hours=True)
     cli = _index_employees(cli_records, cli_key_column, cli_hours_column,
-                           "Client Worksheet")
+                       "Client Worksheet", sum_hours=False)
 
     mismatches: list[dict] = []
+    matched: list[dict] = []
     matches = 0
     high = 0
 
@@ -237,6 +255,9 @@ def compare_records(att_records, cli_records, att_key_column, cli_key_column,
 
         if a["hours"] == b["hours"]:
             matches += 1
+            matched.append(_matched(
+                a["id"] or a["fallback_id"], a["name"],
+                a["raw_hours"], b["raw_hours"]))
             continue
 
         difference = abs(a["hours"] - b["hours"])
@@ -279,7 +300,7 @@ def compare_records(att_records, cli_records, att_key_column, cli_key_column,
             "Confirm whether the client time entry is authorised and the "
             "employee's iLink attendance is complete."))
 
-    return {
+        return {
         "summary": {
             "total_records_compared": matches + len(mismatches),
             "matches": matches,
@@ -287,8 +308,8 @@ def compare_records(att_records, cli_records, att_key_column, cli_key_column,
             "review_required": high,
         },
         "mismatches": mismatches,
+        "matched": matched,
     }
-
 
 def _plain(value):
     """Convert NumPy scalars (CSV type inference) to plain Python numbers so

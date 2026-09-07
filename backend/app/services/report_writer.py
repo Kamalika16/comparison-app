@@ -12,6 +12,7 @@ SEVERITY_FILL = {
     "HIGH": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
     "MEDIUM": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
     "LOW": PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"),
+    "MATCH": PatternFill(start_color="C6E0B4", end_color="C6E0B4", fill_type="solid"),
 }
 
 HEADER_FILL = PatternFill(start_color="305496", end_color="305496", fill_type="solid")
@@ -53,6 +54,8 @@ def _difference(m: dict):
 def _classification_label(m: dict) -> str:
     """Human-readable classification identical to the UI badge, derived from
     the same null checks (never invented)."""
+    if m.get("classification") == "MATCH":
+        return "Matched"
     has_att = m.get("company_hours") is not None
     has_cli = m.get("client_hours") is not None
     if has_att and not has_cli:
@@ -77,6 +80,7 @@ def _autosize_columns(ws, headers) -> None:
 def write_report(result: dict, output_path: str, meta: dict | None = None) -> Path:
     summary = result.get("summary", {})
     mismatches = result.get("mismatches", [])
+    matched = result.get("matched", [])
     meta = meta or {}
     headers = detail_headers(meta)
 
@@ -108,6 +112,7 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
     ws_summary.column_dimensions["B"].width = 34
 
     # --- Details sheet (mismatches only — mirrors the UI table) ---
+        # --- Details sheet (mismatches AND matches) ---
     ws_details = wb.create_sheet("Details")
     ws_details.append(headers)
     for cell in ws_details[1]:
@@ -115,7 +120,7 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center")
 
-    for m in mismatches:
+    for m in mismatches + matched:
         ws_details.append([
             m.get("employee_id", "") or "",
             m.get("employee_name", "") or "",

@@ -12,31 +12,6 @@ const CLIENT_FIXTURE = path.join(
   __dirname, "..", "..", "backend", "tests", "fixtures", "sample_client_work.xlsx"
 );
 
-/**
- * These tests drive the actual React app in a real browser. Selectors
- * deliberately use accessible roles/labels/text -- the same attributes a
- * screen reader user would rely on -- rather than brittle CSS classes, so
- * the tests keep working through most visual refactors.
- *
- * POST /api/compare now always routes through the LLM (see
- * backend/app/routes/compare.py -> compare_via_llm). Tests that reach that
- * endpoint intercept the network call with page.route() and return a fixed
- * response instead of letting the real backend call Groq, on purpose:
- *
- *   - LLM latency (plus our small MAX_RECORDS_PER_BATCH) can be slower and
- *     more variable than a fixed timeout should have to account for.
- *   - Real calls cost tokens and are subject to rate limits -- undesirable
- *     on every push/PR in CI.
- *   - These tests exist to verify the REACT APP renders and behaves
- *     correctly given a known API response -- not to verify Groq's model
- *     quality, which the app doesn't control.
- *
- * A separate, opt-in live test at the bottom exercises the real backend +
- * real LLM end to end; it's skipped unless you explicitly ask for it.
- */
-
-// Matches the shape POST /api/compare actually returns: summary +
-// mismatches + report_id (see routes/compare.py and report_writer.py).
 const FAKE_COMPARE_RESPONSE = {
   summary: {
     total_records_compared: 3,
