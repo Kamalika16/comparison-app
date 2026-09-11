@@ -1,7 +1,8 @@
+import difflib
+import re
 from pathlib import Path
 
 import pandas as pd
-
 
 def _read_table(path: str, sheet=0) -> pd.DataFrame:
     """Read an Excel sheet or a CSV file into a DataFrame."""
@@ -94,18 +95,71 @@ def find_numeric_columns(records: list[dict], exclude: list[str] | None = None) 
     return candidates
 
 
+# Phrases that genuinely mean "this is the hours total we want". Matched
+# fuzzily (see _hours_name_score) so real-world typos and casing variants
+# ("Bilable Hours", "TOTAL HRS") still hit, without hardcoding exact strings.
+_HOURS_POSITIVE_HINTS = [
+    "billable hours", "total hours", "hours worked", "worked hours",
+    "hours", "hrs", "total hrs",
+]
+
+# Standalone words that mark a column as hour-shaped but NOT the one we
+# want by default (non-billable/overtime hours, etc). Checked as whole
+# words (not substrings) so it still catches misspelled neighbors --
+# "Non-Bilable Hours" is flagged by the word "non" alone, regardless of
+# how "billable" itself is spelled.
+_HOURS_NEGATIVE_WORDS = {"non", "unbillable", "overtime", "ot"}
+
+
+def _hours_name_score(column_name) -> float:
+    """Fuzzy 0-1 score for how likely this column name refers to the hours
+    total we want, tolerant of typos/casing/extra words ('Bilable Hours'
+    still scores high against 'billable hours'). Column names unrelated to
+    hours (dates, IDs, costs, per-weekday breakdowns) score near 0."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower()).strip()
+    if not normalized:
+        return 0.0
+
+    best = 0.0
+    for hint in _HOURS_POSITIVE_HINTS:
+        ratio = difflib.SequenceMatcher(None, normalized, hint).ratio()
+        best = max(best, ratio)
+    # Reward a direct "hour(s)"/"hrs" substring even inside a longer/odd
+    # header (e.g. "Total Work Hours (Approved)").
+    if re.search(r"\bhours?\b|\bhrs\b", normalized):
+        best = max(best, 0.7)
+
+    if set(normalized.split()) & _HOURS_NEGATIVE_WORDS:
+        best *= 0.5
+
+    return best
+
+
+# A name match needs at least this much fuzzy confidence to be trusted...
+_HOURS_NAME_MIN_SCORE = 0.6
+# ...and needs to lead the next-best candidate by at least this much, so a
+# genuine tie (two equally hour-ish names) still falls through to asking
+# the user rather than guessing between them.
+_HOURS_NAME_MIN_LEAD = 0.15
+
+
 def detect_hours_column(records: list[dict], exclude: list[str] | None = None) -> str:
-    """Detect the single fully numeric Total Hours column in a loaded sheet
-    or CSV table.
+    """Detect the Total Hours column in a loaded sheet or CSV table.
 
-    A column qualifies when every non-blank cell is a number (or a cleanly
-    parseable numeric string) and at least one such cell exists. Column NAMES
-    are never inspected, so any header works ('Total', 'Hrs', 'Grand Total',
-    ...). ``exclude`` lets callers filter out the primary identifier column so
-    a numeric ID column can never be mistaken for hours.
+    A column is a numeric CANDIDATE when every non-blank cell is a number
+    (or a cleanly parseable numeric string) and at least one such cell
+    exists. ``exclude`` lets callers filter out the primary identifier
+    column so a numeric ID column can never be mistaken for hours.
 
-    Returns the column name. Raises ValueError when zero or more than one
-    column qualifies, so callers never have to guess."""
+    - Exactly one numeric candidate: use it (column name is irrelevant --
+      any header works, e.g. a lone "Grand Total" column).
+    - Multiple numeric candidates (common on real client files: per-weekday
+      totals, rate, cost, billable/non-billable splits, etc.): fall back to
+      fuzzy-matching each candidate's NAME against known "hours" phrasing
+      and pick the clear winner, if there is one.
+    - Zero candidates, or multiple candidates with no confident/clear
+      name match: raise ValueError so the caller surfaces this to the user
+      to choose manually, rather than silently guessing."""
     if not records:
         raise ValueError("Cannot detect a hours column: the dataset has no rows.")
 
@@ -118,6 +172,21 @@ def detect_hours_column(records: list[dict], exclude: list[str] | None = None) -
             "No fully numeric Total Hours column was found "
             "(no column contains only numbers)."
         )
+
+    scored = sorted(
+        ((col, _hours_name_score(col)) for col in candidates),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    best_col, best_score = scored[0]
+    runner_up_score = scored[1][1] if len(scored) > 1 else 0.0
+
+    if (
+        best_score >= _HOURS_NAME_MIN_SCORE
+        and best_score - runner_up_score >= _HOURS_NAME_MIN_LEAD
+    ):
+        return best_col
+
     raise ValueError(
         f"Expected exactly one numeric Total Hours column but found "
         f"{len(candidates)}: {', '.join(map(str, candidates))}."
