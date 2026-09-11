@@ -17,30 +17,47 @@ const FAKE_COMPARE_RESPONSE = {
     total_records_compared: 3,
     matches: 1,
     mismatches: 2,
+    review_required: 1,
   },
   mismatches: [
     {
       id: "H285491",
-      name: "Abdul Hakeem Habeeb Rahman",
-      company_hours: 176,
-      client_hours: 72,
-      classification: "Hours mismatch",
+      employee_name: "Abdul Hakeem Habeeb Rahman",
+      file1_total_hours: 176,
+      file2_hours: 72,
+      difference: 104,
+      status: "Mismatch",
       severity: "HIGH",
-      reason: "iLink total 176 vs Client total 72 - difference 104",
-      recommendation: "Reconcile the logged hours with the client.",
+      reason: "iLink Timesheet total 176 vs Client total 72 - difference 104 (iLink Timesheet higher).",
+      recommendation: "Reconcile the logged hours against the source records.",
     },
     {
       id: "H324723",
-      name: "Abbas Ali Pathan",
-      company_hours: 29.7,
-      client_hours: null,
-      classification: "Only in iLink Attendance",
+      employee_name: "Abbas Ali Pathan",
+      file1_total_hours: 29.7,
+      file2_hours: null,
+      difference: null,
+      status: "Missing in Client",
       severity: "MEDIUM",
-      reason: "Employee present only in iLink Attendance (total 29.7).",
-      recommendation: "Confirm whether work was billed to the client.",
+      reason: "ID exists in iLink Timesheet but not in Client.",
+      recommendation: "Confirm whether the Client entry is missing.",
+    },
+  ],
+  matched: [
+    {
+      id: "H100001",
+      employee_name: "Test Match",
+      file1_total_hours: 40,
+      file2_hours: 40,
+      difference: 0,
+      status: "Match",
+      severity: "MATCH",
+      reason: "Hours match.",
+      recommendation: "",
     },
   ],
   report_id: "e2e-fake-report-id",
+  client_display_name: "Client",
 };
 
 /** Intercept POST /api/compare and return a fixed, known response instead
@@ -86,10 +103,10 @@ test.describe("Compare Files workflow", () => {
 
     // --- Upload the two fixture files -------------------------------------
     const attendanceInput = page
-      .getByRole("button", { name: /iLink Attendance/i })
+      .getByRole("button", { name: /iLink Timesheet/i })
       .locator('input[type="file"]');
     const clientInput = page
-      .getByRole("button", { name: /Client Worksheet/i })
+      .getByRole("button", { name: /Client File/i })
       .locator('input[type="file"]');
 
     await attendanceInput.setInputFiles(ATTENDANCE_FIXTURE);
@@ -120,6 +137,10 @@ test.describe("Compare Files workflow", () => {
     await expect(page.getByText("Total Compared")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("Matches", { exact: true })).toBeVisible();
     await expect(page.getByText("Mismatches", { exact: true })).toBeVisible();
+    // Confirm the table actually renders real row data from the response
+    // (name, hours, status) -- not just that the summary counters showed up.
+    await expect(page.getByText("Abdul Hakeem Habeeb Rahman")).toBeVisible();
+    await expect(page.getByText("176.00h")).toBeVisible();
 
     // --- Download link should now be present --------------------------------
     const downloadLink = page.getByRole("link", { name: /Download Excel Report/i });
@@ -140,14 +161,14 @@ test.describe("Compare Files workflow", () => {
     await expect(compareButton).toBeDisabled();
 
     const attendanceInput = page
-      .getByRole("button", { name: /iLink Attendance/i })
+      .getByRole("button", { name: /iLink Timesheet/i })
       .locator('input[type="file"]');
     await attendanceInput.setInputFiles(ATTENDANCE_FIXTURE);
 
     await expect(compareButton).toBeDisabled();
 
     const clientInput = page
-      .getByRole("button", { name: /Client Worksheet/i })
+      .getByRole("button", { name: /Client File/i })
       .locator('input[type="file"]');
     await clientInput.setInputFiles(CLIENT_FIXTURE);
 
@@ -166,10 +187,10 @@ test.describe("Compare Files workflow", () => {
     await page.goto("/");
 
     const attendanceInput = page
-      .getByRole("button", { name: /iLink Attendance/i })
+      .getByRole("button", { name: /iLink Timesheet/i })
       .locator('input[type="file"]');
     const clientInput = page
-      .getByRole("button", { name: /Client Worksheet/i })
+      .getByRole("button", { name: /Client File/i })
       .locator('input[type="file"]');
 
     await attendanceInput.setInputFiles(ATTENDANCE_FIXTURE);
@@ -193,7 +214,7 @@ test.describe("Compare Files workflow", () => {
     await page.goto("/");
 
     const attendanceInput = page
-      .getByRole("button", { name: /iLink Attendance/i })
+      .getByRole("button", { name: /iLink Timesheet/i })
       .locator('input[type="file"]');
 
     await attendanceInput.setInputFiles({
@@ -224,10 +245,10 @@ test.describe("Live LLM integration (opt-in, not run in CI)", () => {
     await page.goto("/");
 
     const attendanceInput = page
-      .getByRole("button", { name: /iLink Attendance/i })
+      .getByRole("button", { name: /iLink Timesheet/i })
       .locator('input[type="file"]');
     const clientInput = page
-      .getByRole("button", { name: /Client Worksheet/i })
+      .getByRole("button", { name: /Client File/i })
       .locator('input[type="file"]');
 
     await attendanceInput.setInputFiles(ATTENDANCE_FIXTURE);

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from collections import Counter
@@ -9,8 +8,7 @@ from .llm_comparator import _employee_key
 
 
 class ComparisonError(ValueError):
-   
-
+    """Raised when two datasets cannot be compared (e.g. missing key column)."""
 
 def _display_identifier(record: dict, key_column: str) -> str:
     raw = record.get(key_column)
