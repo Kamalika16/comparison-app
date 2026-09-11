@@ -9,7 +9,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
 from ..config import UPLOAD_DIR, OUTPUT_DIR
-from ..services.excel_loader import get_columns, load_records, detect_hours_column
+from ..services.excel_loader import get_columns, load_records, detect_hours_column, _is_missing
 from ..services.hours_comparator import compare_records
 from ..services.report_writer import write_report
 
@@ -17,6 +17,21 @@ from ..services.report_writer import write_report
 router = APIRouter(prefix="/api", tags=["compare"])
 
 ALLOWED_EXT = {".xlsx", ".xls", ".csv"}
+
+
+def _client_display_name(records: list[dict]) -> str:
+    """Read the client label from the first file's second column."""
+    if not records:
+        return "Client"
+    columns = list(records[0])
+    if len(columns) < 2:
+        return "Client"
+    client_column = columns[1]
+    for record in records:
+        value = record.get(client_column)
+        if not _is_missing(value):
+            return str(value).strip()
+    return "Client"
 
 
 def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
@@ -83,12 +98,14 @@ async def compare(
             cli_records,
             exclude=[client_key_column]
         )
+        client_display_name = _client_display_name(att_records)
 
         meta = {
             "attendance_key_column": attendance_key_column,
             "client_key_column": client_key_column,
             "attendance_hours_column": att_hours_column,
             "client_hours_column": cli_hours_column,
+            "client_display_name": client_display_name,
         }
 
         result = compare_records(
@@ -98,6 +115,8 @@ async def compare(
             client_key_column,
             att_hours_column,
             cli_hours_column,
+            file1_label="iLink Timesheet",
+            file2_label=client_display_name,
         )
 
     except json.JSONDecodeError:
@@ -148,6 +167,7 @@ async def compare(
         )
 
     result["report_id"] = report_id
+    result["client_display_name"] = meta["client_display_name"]
 
     return result
 

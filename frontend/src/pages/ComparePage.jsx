@@ -153,16 +153,16 @@ export default function ComparePage() {
   // Human-readable list of everything still missing before Compare can run.
   function validationMessage() {
     const items = [];
-    if (!attendanceFile) items.push("upload the iLink Attendance file");
+    if (!attendanceFile) items.push("upload the iLink Timesheet file");
     else if (attendanceColumns.length > 0 && !attendanceKeyColumn)
-      items.push("select the primary identifier column for iLink Attendance");
-    if (!clientFile) items.push("upload the Client Worksheet file");
+      items.push("select the primary identifier column for iLink Timesheet");
+    if (!clientFile) items.push("upload the client file");
     else if (clientColumns.length > 0 && !clientKeyColumn)
-      items.push("select the primary identifier column for Client Worksheet");
+      items.push("select the primary identifier column for the client file");
     if (columnsError.attendance)
-      items.push("iLink Attendance columns could not be read - choose the file again");
+      items.push("iLink Timesheet columns could not be read - choose the file again");
     if (columnsError.client)
-      items.push("Client Worksheet columns could not be read - choose the file again");
+      items.push("Client File columns could not be read - choose the file again");
     if (!items.length) return "";
     return `To run the comparison: ${items.join("; ")}.`;
   }
@@ -170,7 +170,7 @@ export default function ComparePage() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <h1>iLink Attendance vs Client Worksheet</h1>
+        <h1>iLink Timesheet vs Client File</h1>
         <p>
           Upload both Excel files, pick the column that identifies employees in
           each, then compare working hours.
@@ -183,7 +183,7 @@ export default function ComparePage() {
       <section className="upload-section" aria-label="Input files">
         <div className="upload-panel">
           <FileUploader
-            label="iLink Attendance"
+            label="iLink Timesheet"
             file={attendanceFile}
             onFileSelected={(file) => handleFileSelected("attendance", file)}
           />
@@ -205,7 +205,7 @@ export default function ComparePage() {
 
         <div className="upload-panel">
           <FileUploader
-            label="Client Worksheet"
+            label="Client File"
             file={clientFile}
             onFileSelected={(file) => handleFileSelected("client", file)}
           />
@@ -280,7 +280,11 @@ export default function ComparePage() {
           </div>
 
           <SummaryCards summary={result.summary} />
-          <MismatchTable mismatches={result.mismatches} summary={result.summary} />
+          <MismatchTable
+            rows={[...(result.mismatches || []), ...(result.matched || [])]}
+            summary={result.summary}
+            clientName={result.client_display_name}
+          />
         </section>
       )}
     </div>

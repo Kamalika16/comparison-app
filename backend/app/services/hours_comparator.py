@@ -1,23 +1,7 @@
-"""
-Deterministic Total Hours comparison.
 
-Employees are matched on the normalized values of the user-selected primary
-identifier columns (shared with the LLM path via llm_comparator), then each
-employee's already-calculated Total Hours number is compared DIRECTLY.
-No LLM is involved: hours are never identified, calculated, combined, or summed
-by a model — values are read as-is from the detected numeric column, kept
-unchanged, and compared numerically. Blank identifier rows never join anything;
-each becomes its own record so every employee stays accounted for.
-
-Duplicate identifiers are accepted, never rejected: every row sharing one
-normalized identifier is folded into that ONE employee/entity. Identical
-duplicate rows are copies of the same data and count once; if duplicate rows
-disagree on the provided Total Hours, the conflict surfaces as a single
-review record for that identifier — totals are never summed, averaged,
-silently chosen, or otherwise altered.
-"""
 from __future__ import annotations
 
+from collections import Counter
 import uuid
 
 from .excel_loader import _as_number, _is_missing
@@ -25,7 +9,7 @@ from .llm_comparator import _employee_key
 
 
 class ComparisonError(ValueError):
-    """Raised when the input structure cannot support a direct comparison."""
+   
 
 
 def _display_identifier(record: dict, key_column: str) -> str:
@@ -35,37 +19,52 @@ def _display_identifier(record: dict, key_column: str) -> str:
     return str(raw).strip()
 
 
-def _display_name(record: dict) -> str:
-    """Best-effort human name for reports (display only — never used to match)."""
-    for col in record:
-        if "name" in str(col).lower():
-            raw = record.get(col)
+def _display_name(record: dict, label: str = "", key_column: str = "") -> str:
+    """Get a display name without using it as a comparison key."""
+    normalized_columns = {
+        "".join(char for char in str(column).lower() if char.isalnum()): column
+        for column in record
+    }
+
+    if label == "iLink Attendance":
+        first_column = normalized_columns.get("firstname")
+        last_column = normalized_columns.get("lastname")
+        if first_column or last_column:
+            parts = [
+                record.get(column)
+                for column in (first_column, last_column)
+                if column and not _is_missing(record.get(column))
+            ]
+            if parts:
+                return " ".join(str(part).strip() for part in parts)
+
+    if label == "Client Worksheet":
+        row_labels_column = normalized_columns.get("rowlabels")
+        if row_labels_column and not _is_missing(record.get(row_labels_column)):
+            return str(record[row_labels_column]).strip()
+
+    for column in record:
+        if column == key_column:
+            continue
+        if "name" in str(column).lower():
+            raw = record.get(column)
             if not _is_missing(raw):
                 return str(raw).strip()
     return ""
 
 
 def _fmt(value) -> str:
-    """Format a number without trailing zeros: 184 -> '184', 128.5 -> '128.5'."""
+    
     return f"{value:g}"
 
 def _fold_provided_total(entry: dict, raw_hours, sum_mode: bool = False) -> None:
-    """Accumulate one row's provided hours into the single entity already
-    indexed for its identifier.
-
-    sum_mode=True (attendance side): every non-blank value found for this
-    identifier is ADDED together — this is the multi-row-per-day case,
-    where one employee legitimately has several attendance rows and we want
-    their total worked hours.
-
-    sum_mode=False (client side, default/unchanged): a value numerically
-    equal to one already recorded is a duplicate copy and is ignored; a
-    genuinely different value marks the entity as conflicted rather than
-    guessing which one is correct.
-    """
+    
     if _is_missing(raw_hours):
         return
-    number = _as_number(raw_hours)
+    try:
+        number = _as_number(raw_hours)
+    except (TypeError, ValueError):
+        return
 
     if sum_mode:
         entry["provided_totals"].append((number, _plain(raw_hours)))
@@ -85,18 +84,17 @@ def _fold_provided_total(entry: dict, raw_hours, sum_mode: bool = False) -> None
         entry["hours"] = None
         entry["hours_conflict"] = True
 
-def _index_employees(records, key_column, hours_column, label, sum_hours: bool = False) -> dict:
-    """Group rows by normalized identifier into ONE entity per identifier.
-    Rows repeating an identifier are folded together instead of being
-    rejected: identical duplicate rows are copies of the same employee and
-    count once, while conflicting duplicate totals blank the usable value
-    and raise the ``hours_conflict`` flag for the caller to report. Each
-    entity keeps its ORIGINAL hours value untouched plus a float view for
-    arithmetic. Rows with a blank identifier keep a positional fallback so
-    results can always identify them."""
+def _index_employees(records, key_column, hours_column, label, sum_hours: bool = False,
+                     allowed_keys: set[str] | None = None,
+                     skip_blank: bool = False) -> dict:
+    
     employees: dict = {}
     for pos, record in enumerate(records, start=1):
         key = _employee_key(record, key_column)
+        if skip_blank and not key:
+            continue
+        if allowed_keys is not None and key not in allowed_keys:
+            continue
         if key:
             dict_key = key
         else:
@@ -108,7 +106,9 @@ def _index_employees(records, key_column, hours_column, label, sum_hours: bool =
             entry = {
                 "id": _display_identifier(record, key_column),
                 "fallback_id": "",
-                "name": _display_name(record),
+                "name": "",
+                "name_counts": Counter(),
+                "name_values": {},
                 "rows": [],
                 "raw_hours": None,
                 "hours": None,
@@ -121,12 +121,18 @@ def _index_employees(records, key_column, hours_column, label, sum_hours: bool =
             # employee/entity — fold this row in rather than erroring.
             if not entry["id"]:
                 entry["id"] = _display_identifier(record, key_column)
-            if not entry["name"]:
-                entry["name"] = _display_name(record)
+        display_name = _display_name(record, label, key_column)
+        if display_name:
+            name_key = display_name.casefold()
+            entry["name_counts"][name_key] += 1
+            entry["name_values"][name_key] = display_name
         entry["rows"].append(pos)
         _fold_provided_total(entry, record.get(hours_column),sum_mode=sum_hours)
 
     for entry in employees.values():
+        if entry["name_counts"]:
+            name_key, _ = entry["name_counts"].most_common(1)[0]
+            entry["name"] = entry["name_values"][name_key]
         rows = entry["rows"]
         entry["fallback_id"] = (
             f"(row {rows[0]})" if len(rows) == 1
@@ -135,172 +141,132 @@ def _index_employees(records, key_column, hours_column, label, sum_hours: bool =
     return employees
 
 
-def _duplicate_conflict_note(entry: dict, label: str) -> str:
-    """Human explanation of one side's duplicated, conflicting totals."""
-    rows = ", ".join(str(r) for r in entry["rows"])
-    values = ", ".join(_fmt(number) for number, _ in entry["provided_totals"])
-    return (
-        f"{label} lists this identifier on rows {rows} with conflicting "
-        f"Total Hours values ({values}); the rows are treated as ONE "
-        f"employee and their totals were neither summed nor guessed."
+def _result_row(employee_id, employee_name, file1_hours, file2_hours,
+                status, severity, reason, recommendation) -> dict:
+    difference = (
+        round(file1_hours - file2_hours, 2)
+        if file1_hours is not None and file2_hours is not None
+        else None
     )
-
-def _mismatch(employee_id, employee_name, company_hours, client_hours,
-              status, severity, reason, recommendation) -> dict:
     return {
+        "id": employee_id,
+        "file1_total_hours": file1_hours,
+        "file2_hours": file2_hours,
+        "difference": difference,
+        "status": status,
+        "ID": employee_id,
+        "File1_TotalHours": file1_hours,
+        "File2_Hours": file2_hours,
+        "Difference": difference,
+        "Status": status,
         "employee_id": employee_id,
         "employee_name": employee_name,
-        "company_attendance_status": status,
-        "company_hours": company_hours,
-        "client_hours": client_hours,
-        "classification": "MISMATCH",
+        "company_hours": file1_hours,
+        "client_hours": file2_hours,
+        "company_attendance_status": "Present" if file1_hours is not None else "Missing",
+        "classification": "MATCH" if status == "Match" else "MISMATCH",
         "severity": severity,
         "reason": reason,
         "recommendation": recommendation,
     }
 
-def _matched(employee_id, employee_name, company_hours, client_hours) -> dict:
-    return {
-        "employee_id": employee_id,
-        "employee_name": employee_name,
-        "company_attendance_status": "Present",
-        "company_hours": company_hours,
-        "client_hours": client_hours,
-        "classification": "MATCH",
-        "severity": "MATCH",
-        "reason": "Hours match — no discrepancy.",
-        "recommendation": "",
-    }
-
 def compare_records(att_records, cli_records, att_key_column, cli_key_column,
-                    att_hours_column, cli_hours_column) -> dict:
-    """Match employees via selected identifier columns and compare their
-    provided Total Hours values directly. The response shape is identical to
-    the previous LLM-based result, so downstream consumers are unaffected.
-    Duplicate identifiers inside either input are ONE employee/entity (see
-    ``_index_employees``): identical copies count once and conflicting
-    totals surface as a single review record per identifier."""
-    att = _index_employees(att_records, att_key_column, att_hours_column,
-                       "iLink Attendance", sum_hours=True)
-    cli = _index_employees(cli_records, cli_key_column, cli_hours_column,
-                       "Client Worksheet", sum_hours=False)
+                    att_hours_column, cli_hours_column,
+                    file1_label="iLink Timesheet", file2_label="Client") -> dict:
+    """Aggregate File 1 by its selected ID, then join the result to File 2."""
+    client_ids = {
+        key for record in cli_records
+        if (key := _employee_key(record, cli_key_column))
+    }
+    att = _index_employees(
+        att_records,
+        att_key_column,
+        att_hours_column,
+        "iLink Attendance",
+        sum_hours=True,
+        allowed_keys=client_ids,
+        skip_blank=True,
+    )
+    cli = _index_employees(
+        cli_records,
+        cli_key_column,
+        cli_hours_column,
+        "Client Worksheet",
+        sum_hours=True,
+        skip_blank=True,
+    )
 
     mismatches: list[dict] = []
     matched: list[dict] = []
     matches = 0
     high = 0
 
-    for key, a in att.items():
+    for key in list(att) + [key for key in cli if key not in att]:
+        a = att.get(key)
         b = cli.get(key)
+        entry = a or b
+        employee_id = entry["id"] or entry["fallback_id"]
+        employee_name = (a or {}).get("name") or (b or {}).get("name", "")
+        file1_hours = None if a is None or a["hours_conflict"] else a["hours"]
+        file2_hours = None if b is None or b["hours_conflict"] else b["hours"]
 
-        # Duplicated identifier whose rows disagree on the provided Total
-        # Hours: report it EXACTLY ONCE for manual reconciliation instead of
-        # comparing an arbitrarily chosen value or creating extra records.
-        if a["hours_conflict"] or (b is not None and b["hours_conflict"]):
-            parts = []
-            if a["hours_conflict"]:
-                parts.append(_duplicate_conflict_note(a, "iLink Attendance"))
-            elif a["hours"] is None:
-                parts.append("iLink Attendance provides no Total Hours "
-                             "value for this identifier.")
-            else:
-                parts.append(f"iLink Attendance reports a single total of "
-                             f"{_fmt(a['hours'])}.")
-            if b is not None and b["hours_conflict"]:
-                parts.append(_duplicate_conflict_note(b, "Client Worksheet"))
-            elif b is None:
-                parts.append("No Client Worksheet record exists for this "
-                             "identifier.")
-            elif b["hours"] is None:
-                parts.append("The Client Worksheet provides no Total Hours "
-                             "value for this identifier.")
-            else:
-                parts.append(f"The Client Worksheet reports a single total "
-                             f"of {_fmt(b['hours'])}.")
+        if a is None:
             high += 1
-            mismatches.append(_mismatch(
-                a["id"] or (b["id"] if b is not None else "") or a["fallback_id"],
-                a["name"] or (b["name"] if b is not None else ""),
-                None if a["hours_conflict"] else a["raw_hours"],
-                None if (b is None or b["hours_conflict"]) else b["raw_hours"],
-                "Present", "HIGH",
-                "; ".join(parts) + " Manual reconciliation required.",
-                "Reconcile the duplicated rows to a single Total Hours value "
-                "in the source file, then re-run the comparison."))
+            mismatches.append(_result_row(
+                employee_id, employee_name, None, file2_hours,
+                f"Missing in {file1_label}", "HIGH",
+                f"ID exists in {file2_label} but not in {file1_label}.",
+                f"Confirm the {file2_label} entry and the source attendance records."))
             continue
-
         if b is None:
-            total = (f"(total {_fmt(a['hours'])})" if a["hours"] is not None
-                     else "(total hours value missing)")
-            mismatches.append(_mismatch(
-                a["id"] or a["fallback_id"], a["name"],
-                a["raw_hours"], None, "Present", "MEDIUM",
-                f"Employee present only in iLink Attendance {total}; "
-                "no Client Worksheet record.",
-                "Confirm whether work was performed but not recorded for the "
-                "client."))
+            mismatches.append(_result_row(
+                employee_id, employee_name, file1_hours, None,
+                f"Missing in {file2_label}", "MEDIUM",
+                f"ID exists in {file1_label} but not in {file2_label}.",
+                f"Confirm whether the {file2_label} entry is missing."))
             continue
-
-        if a["hours"] is None or b["hours"] is None:
-            missing_side = ("iLink Attendance" if a["hours"] is None
-                            else "Client Worksheet")
-            mismatches.append(_mismatch(
-                a["id"] or b["id"] or a["fallback_id"] or b["fallback_id"],
-                a["name"] or b["name"],
-                a["raw_hours"], b["raw_hours"], "Present", "LOW",
-                f"Matched employee but the total-hours value is missing in "
-                f"{missing_side}; treated as missing, not zero.",
-                f"Obtain the missing {missing_side} total for this employee."))
+        if a["hours_conflict"] or b["hours_conflict"] or file1_hours is None or file2_hours is None:
+            high += 1
+            mismatches.append(_result_row(
+                employee_id, employee_name, file1_hours, file2_hours,
+                "Mismatch", "HIGH",
+                "Hours could not be compared because a selected hours value is conflicting or missing.",
+                "Reconcile the hours values in the source files."))
             continue
-
-        if a["hours"] == b["hours"]:
+        if file1_hours == file2_hours:
             matches += 1
-            matched.append(_matched(
-                a["id"] or a["fallback_id"], a["name"],
-                a["raw_hours"], b["raw_hours"]))
+            matched.append(_result_row(
+                employee_id, employee_name, file1_hours, file2_hours,
+                "Match", "MATCH", "Hours match.", ""))
             continue
 
-        difference = abs(a["hours"] - b["hours"])
-        higher = "Client Worksheet" if b["hours"] > a["hours"] else "iLink Attendance"
-        severity = "HIGH" if b["hours"] > a["hours"] else "MEDIUM"
+        difference = abs(file1_hours - file2_hours)
+        severity = "HIGH" if file2_hours > file1_hours else "MEDIUM"
         if severity == "HIGH":
             high += 1
-        mismatches.append(_mismatch(
-            a["id"], a["name"], a["raw_hours"], b["raw_hours"], "Present",
-            severity,
-            f"iLink total {_fmt(a['hours'])} vs Client total "
-            f"{_fmt(b['hours'])} - difference {_fmt(difference)} "
-            f"({higher} higher).",
+        higher_side = file2_label if file2_hours > file1_hours else file1_label
+        mismatches.append(_result_row(
+            employee_id, employee_name, file1_hours, file2_hours,
+            "Mismatch", severity,
+            f"{file1_label} total {_fmt(file1_hours)} vs {file2_label} total {_fmt(file2_hours)} - "
+            f"difference {_fmt(difference)} ({higher_side} higher).",
             "Reconcile the logged hours against the source records."))
 
-    for key, b in cli.items():
-        if key in att:
-            continue
-        if b["hours_conflict"]:
-            # Conflicting duplicate rows on the client-only side: one review
-            # record for this identifier — never separate employees.
-            high += 1
-            mismatches.append(_mismatch(
-                b["id"] or b["fallback_id"], b["name"], None, None,
-                "Missing", "HIGH",
-                _duplicate_conflict_note(b, "Client Worksheet")
-                + " No iLink Attendance record exists for this identifier.",
-                "Reconcile the duplicated rows to a single Total Hours value, "
-                "confirm the client time entry is authorised and the "
-                "employee's iLink attendance is complete."))
-            continue
-        total = (f"(total {_fmt(b['hours'])})" if b["hours"] is not None
-                 else "(total hours value missing)")
-        high += 1
-        mismatches.append(_mismatch(
-            b["id"] or b["fallback_id"], b["name"], None, b["raw_hours"],
-            "Missing", "HIGH",
-            f"Employee present only in Client Worksheet {total}; "
-            "no iLink Attendance record.",
-            "Confirm whether the client time entry is authorised and the "
-            "employee's iLink attendance is complete."))
+    only_attendance = set(att) - set(cli)
+    only_client = set(cli) - set(att)
+    print(
+        "Comparison counts: "
+        f"raw File 1 rows={len(att_records)}, "
+        f"valid common IDs={len(set(att) & set(cli))}, "
+        f"aggregated File 1 IDs={len(att)}, "
+        f"File 2 IDs={len(cli)}, "
+        f"matched IDs={matches}, "
+        f"mismatched IDs={len(mismatches)}, "
+        f"only in File 1={len(only_attendance)}, "
+        f"only in File 2={len(only_client)}"
+    )
 
-        return {
+    return {
         "summary": {
             "total_records_compared": matches + len(mismatches),
             "matches": matches,
@@ -318,9 +284,7 @@ def _plain(value):
 
 
 def datasets_equivalent(att_records, cli_records, att_key_column, cli_key_column) -> bool:
-    """True when both uploads carry the SAME employee records — same row
-    count and an identical multiset of normalized identifier values — i.e.
-    two copies of one dataset rather than two independent sources."""
+    
     if len(att_records) != len(cli_records):
         return False
     att_keys = [_employee_key(r, att_key_column) for r in att_records]
@@ -329,17 +293,7 @@ def datasets_equivalent(att_records, cli_records, att_key_column, cli_key_column
 
 
 def compare_within_file(records, key_column, hours_col1, hours_col2) -> dict:
-    """Same-dataset mode: the two uploads are copies of ONE dataset whose
-    table carries TWO Total Hours columns. Compare those two columns against
-    each other for every record of the single dataset — the files are not
-    treated as separate employee sources. Duplicate identifiers are folded
-    into ONE record here as well: identical duplicate rows evaluate once,
-    and rows disagreeing on a Total Hours column produce a single review
-    record instead of multiple entries (values are never summed or
-    invented). Identifier/name information is preserved so any difference is
-    clearly attributable."""
-    # Group rows by normalized identifier, preserving sheet order. Rows with
-    # a blank identifier stay singleton groups (they never join anything).
+    
     groups: dict = {}
     for pos, record in enumerate(records, start=1):
         key = _employee_key(record, key_column)

@@ -20,22 +20,17 @@ HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 
 def detail_headers(meta: dict | None) -> list[str]:
-    """Column layout mirrors the on-screen results table (Phase 6). The first
-    header embeds the dynamically selected primary identifier column."""
-    att_key = (meta or {}).get("attendance_key_column")
-    id_header = (
-        f"Primary Identifier ({att_key})" if att_key else "Primary Identifier"
-    )
+    """Column layout for the joined comparison result."""
+    meta = meta or {}
+    client_name = meta.get("client_display_name", "Client")
     return [
-        id_header,
         "Employee Name",
-        "Attendance Hours",
-        "Client Hours",
+        "ID",
+        "iLink Timesheet Hours",
+        f"{client_name} Hours",
         "Difference",
-        "Classification",
-        "Severity",
+        "Status",
         "Reason",
-        "Recommendation",
     ]
 
 
@@ -51,7 +46,7 @@ def _difference(m: dict):
         return None
 
 
-def _classification_label(m: dict) -> str:
+def _classification_label(m: dict, client_name: str = "Client") -> str:
     """Human-readable classification identical to the UI badge, derived from
     the same null checks (never invented)."""
     if m.get("classification") == "MATCH":
@@ -59,9 +54,9 @@ def _classification_label(m: dict) -> str:
     has_att = m.get("company_hours") is not None
     has_cli = m.get("client_hours") is not None
     if has_att and not has_cli:
-        return "Only in iLink Attendance"
+        return "Only in iLink Timesheet"
     if has_cli and not has_att:
-        return "Only in Client Worksheet"
+        return f"Only in {client_name}"
     if has_att and has_cli:
         return "Hours mismatch"
     return "Incomplete record"
@@ -111,8 +106,7 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
     ws_summary.column_dimensions["A"].width = 32
     ws_summary.column_dimensions["B"].width = 34
 
-    # --- Details sheet (mismatches only — mirrors the UI table) ---
-        # --- Details sheet (mismatches AND matches) ---
+    # --- Details sheet (matches and mismatches, mirroring the UI table) ---
     ws_details = wb.create_sheet("Details")
     ws_details.append(headers)
     for cell in ws_details[1]:
@@ -122,15 +116,13 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
 
     for m in mismatches + matched:
         ws_details.append([
-            m.get("employee_id", "") or "",
             m.get("employee_name", "") or "",
-            m.get("company_hours"),
-            m.get("client_hours"),
-            _difference(m),
-            _classification_label(m),
-            m.get("severity", ""),
+            m.get("id", m.get("employee_id", "")) or "",
+            m.get("file1_total_hours", m.get("company_hours")),
+            m.get("file2_hours", m.get("client_hours")),
+            m.get("difference", _difference(m)),
+            m.get("status", "Mismatch"),
             m.get("reason", "") or "",
-            m.get("recommendation", "") or "",
         ])
         fill = SEVERITY_FILL.get(m.get("severity"))
         if fill:

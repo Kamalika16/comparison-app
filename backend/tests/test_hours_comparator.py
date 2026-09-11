@@ -1,11 +1,4 @@
-"""Regression tests for duplicate-identifier handling in the deterministic
-Total Hours comparison.
-
-Every row sharing one normalized selected primary identifier must be treated
-as ONE employee/entity: represented at most once in the comparison results,
-never rejected with a duplicate error, and its provided Total Hours values
-must never be summed or replaced with invented ones.
-"""
+"""Regression tests for selected-ID aggregation and comparison."""
 import pandas as pd
 
 from app.services.excel_loader import detect_hours_column, load_records
@@ -40,9 +33,9 @@ class TestDuplicateIdenticalData:
             "mismatches": 1,
             "review_required": 0,
         }
-        assert _ids(result) == ["E001"]  # E001 appears exactly once
+        assert _ids(result) == ["E001"]
         m = result["mismatches"][0]
-        assert m["company_hours"] == 40  # original value, unmodified
+        assert m["company_hours"] == 80
         assert m["client_hours"] == 38
         assert m["severity"] == "MEDIUM"
 
@@ -57,13 +50,13 @@ class TestDuplicateSameHours:
         result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
 
         assert result["summary"]["total_records_compared"] == 1
-        assert result["summary"]["matches"] == 1
-        assert result["summary"]["mismatches"] == 0
-        assert result["mismatches"] == []
+        assert result["summary"]["matches"] == 0
+        assert result["summary"]["mismatches"] == 1
+        assert result["mismatches"][0]["company_hours"] == 80
 
 
 class TestDuplicateConflictingHours:
-    def test_conflicting_totals_yield_single_review_record(self):
+    def test_multiple_file1_totals_are_summed_once(self):
         att = [
             {ATT_KEY: "E200", "Employee Name": "Dana Fox", HOURS: 40},
             {ATT_KEY: "E200", "Employee Name": "Dana Fox", HOURS: 32},
@@ -71,37 +64,15 @@ class TestDuplicateConflictingHours:
         cli = [{CLI_KEY: "E200", "Employee Name": "Dana Fox", HOURS: 36}]
         result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
 
-        assert len(result["mismatches"]) == 1  # one record, not two
-        m = result["mismatches"][0]
-        assert m["severity"] == "HIGH"
-        assert m["company_hours"] is None  # no value silently chosen
-        assert m["client_hours"] == 36
-        assert "40" in m["reason"] and "32" in m["reason"]
-        assert "72" not in m["reason"]  # totals were NOT summed
-        assert result["summary"]["mismatches"] == 1
-        assert result["summary"]["review_required"] == 1
-
-    def test_conflicts_on_both_sides_reported_once(self):
-        att = [
-            {ATT_KEY: "E201", "Employee Name": "Evan Gray", HOURS: 40},
-            {ATT_KEY: "E201", "Employee Name": "Evan Gray", HOURS: 32},
-        ]
-        cli = [
-            {CLI_KEY: "E201", "Employee Name": "Evan Gray", HOURS: 36},
-            {CLI_KEY: "E201", "Employee Name": "Evan Gray", HOURS: 30},
-        ]
-        result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
-
         assert len(result["mismatches"]) == 1
         m = result["mismatches"][0]
-        assert m["company_hours"] is None and m["client_hours"] is None
-        for value in ("40", "32", "36", "30"):
-            assert value in m["reason"]
-        assert result["summary"]["mismatches"] == 1
+        assert m["severity"] == "MEDIUM"
+        assert m["company_hours"] == 72
+        assert m["client_hours"] == 36
+        assert m["difference"] == 36
+        assert result["summary"]["review_required"] == 0
 
-    def test_blank_duplicate_row_uses_the_provided_value(self):
-        # A blank Total Hours cell adds no information: it is neither a
-        # conflict nor a zero, so the single provided value stands.
+    def test_blank_duplicate_hour_is_ignored(self):
         att = [
             {ATT_KEY: "E202", "Employee Name": "Fay Hale", HOURS: None},
             {ATT_KEY: "E202", "Employee Name": "Fay Hale", HOURS: 24},
@@ -110,41 +81,77 @@ class TestDuplicateConflictingHours:
         result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
 
         assert result["summary"]["matches"] == 1
-        assert result["mismatches"] == []
+        assert result["matched"][0]["company_hours"] == 24
 
 
 class TestEachIdentifierOnce:
-    def test_mixed_files_list_every_identifier_exactly_once(self):
+    def test_mixed_files_list_every_identifier_once(self):
         att = [
-            {ATT_KEY: "A", "Employee Name": "A", HOURS: 10},
-            {ATT_KEY: "B", "Employee Name": "B", HOURS: 20},
-            {ATT_KEY: "B", "Employee Name": "B", HOURS: 20},  # identical copy
-            {ATT_KEY: "C", "Employee Name": "C", HOURS: 30},
-            {ATT_KEY: "C", "Employee Name": "C", HOURS: 35},  # conflicting copy
-            {ATT_KEY: None, "Employee Name": "No ID", HOURS: 40},
+            {ATT_KEY: "A", HOURS: 10},
+            {ATT_KEY: "B", HOURS: 20},
+            {ATT_KEY: "B", HOURS: 20},
+            {ATT_KEY: "C", HOURS: 30},
+            {ATT_KEY: "C", HOURS: 35},
+            {ATT_KEY: None, HOURS: 40},
         ]
         cli = [
-            {CLI_KEY: "A", "Employee Name": "A", HOURS: 10},
-            {CLI_KEY: "B", "Employee Name": "B", HOURS: 22},
-            {CLI_KEY: "C", "Employee Name": "C", HOURS: 33},
-            {CLI_KEY: "X", "Employee Name": "X", HOURS: 50},
-            {CLI_KEY: "Y", "Employee Name": "Y", HOURS: 51},
+            {CLI_KEY: "A", HOURS: 10},
+            {CLI_KEY: "B", HOURS: 22},
+            {CLI_KEY: "C", HOURS: 33},
+            {CLI_KEY: "X", HOURS: 50},
+            {CLI_KEY: "Y", HOURS: 51},
         ]
         result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
-        s = result["summary"]
 
-        # Six entities: A, B, C, the blank-ID row, X and Y — regardless of
-        # how many physical rows produced them.
-        assert s["total_records_compared"] == 6
-        assert s["matches"] == 1  # only A reconciles
-        assert s["mismatches"] == 5  # B, C, blank-ID row, X, Y
-        assert s["review_required"] == 4  # B & C (client higher / conflict), X, Y
+        assert result["summary"]["total_records_compared"] == 5
+        assert result["summary"]["matches"] == 1
+        assert len(_ids(result)) == len(set(_ids(result)))
 
-        ids = _ids(result)
-        named = sorted(i for i in ids if not i.startswith("(row"))
-        assert named == ["B", "C", "X", "Y"]
-        assert len(ids) == len(set(ids))  # no identifier repeats
-        assert sum(i.startswith("(row") for i in ids) == 1
+    def test_file1_only_values_are_filtered_by_file2_ids(self):
+        att = [
+            {ATT_KEY: "DWP", HOURS: 8},
+            {ATT_KEY: "DWP T&C", HOURS: 8},
+            {ATT_KEY: "H285491", HOURS: 8},
+            {ATT_KEY: "H285491", HOURS: 8},
+        ]
+        cli = [{CLI_KEY: "H285491", HOURS: 16}]
+
+        result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
+
+        assert result["summary"] == {
+            "total_records_compared": 1,
+            "matches": 1,
+            "mismatches": 0,
+            "review_required": 0,
+        }
+        assert result["matched"][0]["employee_id"] == "H285491"
+        assert result["matched"][0]["company_hours"] == 16
+        assert result["matched"][0]["client_hours"] == 16
+
+    def test_duplicate_file2_ids_are_summed(self):
+        att = [{ATT_KEY: "H285491", HOURS: 16}]
+        cli = [
+            {CLI_KEY: "H285491", HOURS: 8},
+            {CLI_KEY: "H285491", HOURS: 8},
+        ]
+
+        result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
+
+        assert result["summary"]["matches"] == 1
+        assert result["matched"][0]["client_hours"] == 16
+
+    def test_names_are_display_only_and_most_frequent_name_is_preserved(self):
+        att = [
+            {"ID": "E300", "First name": "Ada", "Last name": "Lovelace", HOURS: 4},
+            {"ID": "E300", "First name": "ADA", "Last name": "LOVELACE", HOURS: 6},
+            {"ID": "E300", "First name": "Ada", "Last name": "Lovelace", HOURS: 10},
+        ]
+        cli = [{"Network ID": "E300", "Row Labels": "Ada Lovelace", HOURS: 20}]
+
+        result = compare_records(att, cli, "ID", "Network ID", HOURS, HOURS)
+
+        assert result["matched"][0]["employee_name"] == "Ada Lovelace"
+        assert result["matched"][0]["employee_id"] == "E300"
 
 
 class TestBlankIdentifiersNeverJoin:
@@ -159,10 +166,8 @@ class TestBlankIdentifiersNeverJoin:
         ]
         result = compare_records(att, cli, ATT_KEY, CLI_KEY, HOURS, HOURS)
 
-        # Blank identifiers still never join anything: four separate records.
-        assert result["summary"]["mismatches"] == 4
-        severities = sorted(m["severity"] for m in result["mismatches"])
-        assert severities == ["HIGH", "HIGH", "MEDIUM", "MEDIUM"]
+        # Blank identifiers are not valid comparison records.
+        assert result["summary"]["mismatches"] == 0
 
 
 class TestWithinFileDuplicates:
