@@ -2,7 +2,15 @@
 import pandas as pd
 
 from app.services.excel_loader import detect_hours_column, load_records
-from app.services.hours_comparator import compare_records, compare_within_file
+from app.services.hours_comparator import (
+    compare_records,
+    compare_within_file,
+    validate_expected_hours,
+)
+from app.services.completeness_checker import (
+    build_project_completeness,
+    check_completeness,
+)
 
 
 ATT_KEY = "Emp ID"
@@ -38,6 +46,69 @@ class TestDuplicateIdenticalData:
         assert m["company_hours"] == 80
         assert m["client_hours"] == 38
         assert m["severity"] == "MEDIUM"
+
+
+class TestProjectCompleteness:
+    def test_client_ids_are_compared_by_monthly_totals_only(self):
+        client = [
+            {"Project ID": "H324716", "Employee Name": "A. Employee", "Billable Hours": 3, "Non-Billable Hours": 1},
+            {"Project ID": "H324716", "Employee Name": "A. Employee", "Billable Hours": 0, "Non-Billable Hours": 0},
+            {"Project ID": "H111111", "Employee Name": "B. Employee", "Billable Hours": 4, "Non-Billable Hours": 1},
+            {"Project ID": "H222222", "Employee Name": "C. Employee", "Billable Hours": 2, "Non-Billable Hours": 0},
+        ]
+        attendance = [
+            {"Network ID": "h324716", "Employee Name": "A. Employee", "Hours": 3},
+            {"Network ID": "H111111", "Employee Name": "B. Employee", "Hours": 3},
+            {"Network ID": "ILINK-ONLY", "Employee Name": "Extra", "Hours": 99},
+        ]
+
+        rows = build_project_completeness(
+            client, attendance, "Project ID", "Network ID",
+            "Billable Hours", "Hours",
+        )
+
+        assert [row["project_id"] for row in rows] == [
+            "H324716", "H111111", "H222222",
+        ]
+        assert rows[0]["status"] == "Match"
+        assert rows[0]["client_billable_hours"] == 3
+        assert rows[0]["ilink_total_hours"] == 3
+        assert rows[0]["employee_name"] == "A. Employee"
+        assert rows[1]["status"] == "Mismatch"
+        assert rows[1]["reason"] == (
+            "Monthly hours differ — Project ID may be missing for some weeks."
+        )
+        assert rows[2]["status"] == "Project ID Not Found"
+        assert rows[2]["ilink_total_hours"] is None
+        assert rows[2]["reason"] == "Project ID not found in iLink for this period."
+
+    def test_period_rows_and_expected_count_are_preserved_for_level1(self):
+        client = [
+            {"Project ID": "H1", "Month": "Jan", "Year": 2024, "WeekDate": "2024-01-06", "Billable": 30, "Non-Billable": 10},
+            {"Project ID": "H1", "Month": "Jan", "Year": 2024, "WeekDate": "2024-01-13", "Billable": 30, "Non-Billable": 10},
+            {"Project ID": "H1", "Month": "Feb", "Year": 2024, "WeekDate": "2024-02-03", "Billable": 40, "Non-Billable": 0},
+        ]
+
+        result = check_completeness(client, "Project ID", label="Client")
+
+        assert result["period"] == "Jan 2024"
+        assert result["expected_count"] == 2
+        assert len(result["records_in_period"]) == 2
+        assert "file_complete" not in result
+        assert "employee_gaps" not in result
+        stage1 = validate_expected_hours(
+            result["records_in_period"], "Project ID", "Billable",
+            "Non-Billable", result["expected_count"] * 40,
+        )
+        assert stage1["expected_total_hours"] == 80
+        assert stage1["matched"][0]["total_hours"] == 80
+        project_rows = build_project_completeness(
+            result["records_in_period"],
+            [{"Project ID": "H1", "Hours": 60}],
+            "Project ID", "Project ID", "Billable", "Hours",
+        )
+        assert project_rows[0]["client_billable_hours"] == 60
+        assert project_rows[0]["ilink_total_hours"] == 60
 
 
 class TestDuplicateSameHours:

@@ -143,6 +143,112 @@ _HOURS_NAME_MIN_SCORE = 0.6
 _HOURS_NAME_MIN_LEAD = 0.15
 
 
+_BILLABLE_HINTS = ["billable hours", "bilable hours", "billable"]
+_NON_BILLABLE_HINTS = [
+    "non billable hours", "non bilable hours", "non-billable hours",
+    "unbillable hours", "non billable", "unbillable",
+]
+# "Non-Bilable Hours" and "Bilable Hours" are near-identical strings (one is
+# a substring of the other), so plain fuzzy-ratio scoring can't reliably
+# tell them apart -- same word-presence check used for the single-column
+# detector's negative words, applied explicitly here in both directions.
+_NEGATIVE_WORDS = {"non", "unbillable", "un"}
+
+
+def _best_match(
+    candidates: list[str],
+    hints: list[str],
+    require_negative: bool,
+    strict_category: bool = False,
+) -> str | None:
+    def has_negative(col: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(col).lower()).strip()
+        return bool(set(normalized.split()) & _NEGATIVE_WORDS)
+
+    filtered = [c for c in candidates if has_negative(c) == require_negative]
+    pool = filtered if strict_category else filtered or candidates
+
+    scored = sorted(
+        (
+            (col, max(
+                difflib.SequenceMatcher(
+                    None, re.sub(r"[^a-z0-9]+", " ", str(col).lower()).strip(), hint
+                ).ratio()
+                for hint in hints
+            ))
+            for col in pool
+        ),
+        key=lambda pair: pair[1], reverse=True,
+    )
+    if not scored:
+        return None
+    best_col, best_score = scored[0]
+    runner_up = scored[1][1] if len(scored) > 1 else 0.0
+    if best_score >= _HOURS_NAME_MIN_SCORE and best_score - runner_up >= _HOURS_NAME_MIN_LEAD:
+        return best_col
+    return None
+
+
+def detect_billable_column(records: list[dict], exclude: list[str] | None = None) -> str | None:
+    """Best-guess Billable Hours column, or None if not confidently found."""
+    return _best_match(
+        find_numeric_columns(records, exclude), _BILLABLE_HINTS,
+        require_negative=False, strict_category=True,
+    )
+
+
+def detect_non_billable_column(records: list[dict], exclude: list[str] | None = None) -> str | None:
+    """Best-guess Non-Billable Hours column, or None if not confidently found.
+
+    Its own hint list actively looks for 'non/unbillable' rather than
+    inheriting detect_hours_column's penalty against it.
+    """
+    return _best_match(
+        find_numeric_columns(records, exclude), _NON_BILLABLE_HINTS,
+        require_negative=True, strict_category=True,
+    )
+
+
+_DATE_HINTS = ["date", "work date", "attendance date", "log date", "entry date", "timesheet date"]
+
+
+def _looks_like_date_column(records: list[dict], col: str, sample_size: int = 25) -> bool:
+    """True if most sampled, non-missing values in this column actually
+    parse as a date -- not just a name guess."""
+    values = [r.get(col) for r in records[:sample_size] if not _is_missing(r.get(col))]
+    if not values:
+        return False
+    parsed = 0
+    for v in values:
+        if hasattr(v, "year") and hasattr(v, "month"):  # date / datetime / Timestamp
+            parsed += 1
+            continue
+        try:
+            ts = pd.to_datetime(str(v).strip(), dayfirst=True, errors="raise")
+            if not pd.isna(ts):
+                parsed += 1
+        except (ValueError, TypeError):
+            pass
+    return parsed / len(values) >= 0.8
+
+
+def detect_date_column(records: list[dict], exclude: list[str] | None = None) -> str | None:
+    """Best-guess date column for day-level completeness (e.g. the iLink
+    Timesheet's per-row work date), or None if nothing confidently parses
+    as a date. Candidates are filtered by ACTUAL VALUE parsing first (not
+    just name), then a name hint breaks ties if more than one qualifies."""
+    if not records:
+        return None
+    exclude_set = {e for e in (exclude or []) if e}
+    candidates = [c for c in records[0].keys() if c not in exclude_set]
+    date_like = [c for c in candidates if _looks_like_date_column(records, c)]
+    if not date_like:
+        return None
+    if len(date_like) == 1:
+        return date_like[0]
+    return _best_match(date_like, _DATE_HINTS, require_negative=False) or date_like[0]
+
+
 def detect_hours_column(records: list[dict], exclude: list[str] | None = None) -> str:
     """Detect the Total Hours column in a loaded sheet or CSV table.
 
@@ -191,3 +297,51 @@ def detect_hours_column(records: list[dict], exclude: list[str] | None = None) -
         f"Expected exactly one numeric Total Hours column but found "
         f"{len(candidates)}: {', '.join(map(str, candidates))}."
     )
+
+_DATE_NAME_HINTS = ["date", "work date", "entry date", "log date", "attendance date"]
+
+
+def detect_date_column(records: list[dict], exclude: list[str] | None = None) -> str | None:
+    """Best-guess date column: prefers a column whose name hints at 'date',
+    but only actually picks it if a strong majority of its sampled values
+    parse as real dates -- name alone isn't trusted, since a name like
+    'Date' could still hold something else, and a differently-named column
+    (client naming varies) could still be the real date column."""
+    if not records:
+        return None
+    exclude = set(exclude or [])
+    sample = records[:50]
+    candidates = []
+    for col in records[0]:
+        if col in exclude:
+            continue
+        values = [r.get(col) for r in sample if not _is_missing(r.get(col))]
+        if not values:
+            continue
+        parseable = sum(1 for v in values if _looks_like_date(v))
+        ratio = parseable / len(values)
+        if ratio >= 0.7:
+            name_score = max(
+                difflib.SequenceMatcher(
+                    None, re.sub(r"[^a-z0-9]+", " ", str(col).lower()).strip(), hint
+                ).ratio()
+                for hint in _DATE_NAME_HINTS
+            )
+            candidates.append((col, ratio, name_score))
+    if not candidates:
+        return None
+    # Prefer the column that's most clearly date-shaped; break ties by name.
+    candidates.sort(key=lambda c: (c[1], c[2]), reverse=True)
+    return candidates[0][0]
+
+
+def _looks_like_date(value) -> bool:
+    import datetime as _dt
+    import pandas as _pd
+    if isinstance(value, (_dt.date, _pd.Timestamp)):
+        return True
+    s = str(value).strip()
+    if not s or len(s) < 6:
+        return False
+    parsed = _pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return not _pd.isna(parsed)

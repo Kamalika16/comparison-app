@@ -56,6 +56,37 @@ const FAKE_COMPARE_RESPONSE = {
       recommendation: "",
     },
   ],
+  completeness: {
+    projects: [
+      {
+        project_id: "P-MATCH",
+        employee_name: "Match Employee",
+        status: "Match",
+        client_billable_hours: 40,
+        ilink_total_hours: 40,
+      },
+      {
+        project_id: "P-MISMATCH",
+        employee_name: "Mismatch Employee",
+        status: "Mismatch",
+        client_billable_hours: 36,
+        ilink_total_hours: 40,
+        email: "mismatch@example.com",
+        email_subject: "Action needed: Project ID P-MISMATCH hours discrepancy for Jan 2026",
+        email_body: "Hello Mismatch Employee,\n\nReview your January hours.",
+      },
+      {
+        project_id: "P-NOTFOUND",
+        employee_name: "Missing Employee",
+        status: "Project ID Not Found",
+        client_billable_hours: 24,
+        ilink_total_hours: null,
+        email: null,
+        email_subject: "Action needed: Project ID P-NOTFOUND not found in iLink for Jan 2026",
+        email_body: "Hello Missing Employee,\n\nConfirm your Project ID entries.",
+      },
+    ],
+  },
   report_id: "e2e-fake-report-id",
   client_display_name: "Client",
 };
@@ -63,13 +94,16 @@ const FAKE_COMPARE_RESPONSE = {
 /** Intercept POST /api/compare and return a fixed, known response instead
  * of letting the real backend call Groq. */
 async function mockCompareEndpoint(page) {
+  let compareCalls = 0;
   await page.route("**/api/compare", async (route) => {
+    compareCalls += 1;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(FAKE_COMPARE_RESPONSE),
     });
   });
+  return () => compareCalls;
 }
 
 /** Intercept the report download so clicking "Download Excel Report" doesn't
@@ -96,7 +130,7 @@ async function mockDownloadEndpoint(page) {
 
 test.describe("Compare Files workflow", () => {
   test("full happy path: upload both files, pick identifiers, compare, download", async ({ page }) => {
-    await mockCompareEndpoint(page);
+    const getCompareCalls = await mockCompareEndpoint(page);
     await mockDownloadEndpoint(page);
 
     await page.goto("/");
@@ -140,6 +174,28 @@ test.describe("Compare Files workflow", () => {
     // Confirm the table actually renders real row data from the response
     // (name, hours, status) -- not just that the summary counters showed up.
     await expect(page.getByText("Abdul Hakeem Habeeb Rahman")).toBeVisible();
+    await expect(page.getByText("176.00h")).toBeVisible();
+    await expect(page.getByText(/Monthly Project ID Completeness: 1 Match \| 1 Mismatch \| 1 Not Found/)).toBeVisible();
+
+    const draftButton = page.getByRole("button", { name: "Generate Notification Drafts" });
+    await expect(draftButton).toBeEnabled();
+    await draftButton.click();
+
+    const drafts = page.locator(".notification-draft");
+    await expect(drafts).toHaveCount(2);
+    await expect(drafts.filter({ hasText: "P-MATCH" })).toHaveCount(0);
+    const mismatchDraft = drafts.filter({ hasText: "P-MISMATCH" });
+    await expect(mismatchDraft).toContainText("Mismatch Employee");
+    await expect(mismatchDraft).toContainText("Action needed: Project ID P-MISMATCH");
+    await expect(mismatchDraft).toContainText("Review your January hours.");
+    await expect(mismatchDraft.getByRole("link", { name: "Open draft in email client" }))
+      .toHaveAttribute("href", /mailto:mismatch@example\.com\?subject=Action%20needed/);
+
+    const notFoundDraft = drafts.filter({ hasText: "P-NOTFOUND" });
+    await expect(notFoundDraft).toContainText("No email address found in iLink.");
+    await expect(notFoundDraft.getByRole("link")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Compare Files" })).toBeVisible();
+    expect(getCompareCalls()).toBe(1);
     await expect(page.getByText("176.00h")).toBeVisible();
 
     // --- Download link should now be present --------------------------------

@@ -1,10 +1,44 @@
 from __future__ import annotations
 
-from collections import Counter
+import re
 import uuid
+from collections import Counter
 
 from .excel_loader import _as_number, _is_missing
-from .llm_comparator import _employee_key
+
+
+def _normalize_identifier(value) -> str:
+   
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value:  # NaN: pandas' marker for a missing/blank cell
+            return ""
+        return str(int(value)) if value.is_integer() else str(value).strip()
+    return re.sub(r"\s+", " ", str(value)).strip().casefold()
+
+
+def _employee_key(record: dict, key_column: str | None = None) -> str:
+    """Matching key for one record.
+
+    When the user selected a primary identifier column, the normalized VALUE
+    of that column IS the matching key — no other field is consulted. An
+    empty result means the row carries no usable identifier. Only when no
+    column was selected do we fall back to the legacy normalized-NAME
+    heuristic (preserved for callers of the old API shape)."""
+    if key_column:
+        if key_column in record:
+            return _normalize_identifier(record.get(key_column))
+        return ""
+    for k in record:
+        if "name" in str(k).lower():
+            name = str(record[k])
+            return re.sub(r"[^a-z0-9]", "", name.lower())
+    return ""
 
 
 class ComparisonError(ValueError):
@@ -167,6 +201,61 @@ def _result_row(employee_id, employee_name, file1_hours, file2_hours,
         "reason": reason,
         "recommendation": recommendation,
     }
+
+def validate_expected_hours(cli_records, key_column, billable_column,
+                            non_billable_column, expected_total_hours) -> dict:
+
+    employees: dict = {}
+    for pos, record in enumerate(cli_records, start=1):
+        key = _employee_key(record, key_column)
+        if not key:
+            continue
+        entry = employees.setdefault(key, {
+            "id": _display_identifier(record, key_column),
+            "name": "", "name_counts": Counter(), "name_values": {},
+            "billable": 0.0, "non_billable": 0.0,
+        })
+        display_name = _display_name(record, "Client Worksheet", key_column)
+        if display_name:
+            name_key = display_name.casefold()
+            entry["name_counts"][name_key] += 1
+            entry["name_values"][name_key] = display_name
+        for field, col in (("billable", billable_column), ("non_billable", non_billable_column)):
+            raw = record.get(col)
+            if not _is_missing(raw):
+                try:
+                    entry[field] += _as_number(raw)
+                except (TypeError, ValueError):
+                    pass
+
+    matched, mismatched = [], []
+    for entry in employees.values():
+        if entry["name_counts"]:
+            name_key, _ = entry["name_counts"].most_common(1)[0]
+            entry["name"] = entry["name_values"][name_key]
+        total = round(entry["billable"] + entry["non_billable"], 2)
+        row = {
+            "employee_id": entry["id"],
+            "employee_name": entry["name"],
+            "billable_hours": round(entry["billable"], 2),
+            "non_billable_hours": round(entry["non_billable"], 2),
+            "total_hours": total,
+            "expected_total_hours": expected_total_hours,
+            "difference": round(total - expected_total_hours, 2),
+        }
+        (matched if total == expected_total_hours else mismatched).append(row)
+
+    return {
+        "expected_total_hours": expected_total_hours,
+        "matched": matched,
+        "mismatched": mismatched,
+        "summary": {
+            "total_employees": len(employees),
+            "matched": len(matched),
+            "mismatched": len(mismatched),
+        },
+    }
+
 
 def compare_records(att_records, cli_records, att_key_column, cli_key_column,
                     att_hours_column, cli_hours_column,

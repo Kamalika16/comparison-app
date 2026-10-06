@@ -26,6 +26,7 @@ export default function ComparePage() {
     client: null,
   });
   const [result, setResult] = useState(null);
+  const [draftsVisible, setDraftsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -51,6 +52,8 @@ export default function ComparePage() {
 
   // Compare stays disabled until both files are uploaded, their columns
   // are detected, and one matching column is selected for each file.
+  // Expected Total Hrs is auto-calculated server-side (working days in the
+  // client file's own month x 8) -- no user entry needed.
   const canCompare =
     Boolean(attendanceFile) &&
     Boolean(clientFile) &&
@@ -106,6 +109,7 @@ export default function ComparePage() {
     setColumns([]); // re-read columns for the newly selected file
     setKeyColumn(""); // reset stale/invalid selection
     setResult(null); // previous results no longer apply to the new file
+    setDraftsVisible(false);
     setError(null);
 
     detectColumns(file, side);
@@ -134,7 +138,10 @@ export default function ComparePage() {
         now.clientFile !== snapshot.clientFile ||
         now.attendanceKeyColumn !== snapshot.attendanceKeyColumn ||
         now.clientKeyColumn !== snapshot.clientKeyColumn;
-      if (!stale) setResult(data);
+      if (!stale) {
+        setResult(data);
+        setDraftsVisible(false);
+      }
     } catch (err) {
       const detail = err.response?.data?.detail;
       let message = "Something went wrong comparing the files.";
@@ -166,6 +173,20 @@ export default function ComparePage() {
     if (!items.length) return "";
     return `To run the comparison: ${items.join("; ")}.`;
   }
+
+  const completenessRows = result?.completeness?.projects || [];
+  const completenessCounts = completenessRows.reduce(
+    (counts, row) => {
+      if (row.status === "Match") counts.matches += 1;
+      else if (row.status === "Mismatch") counts.mismatches += 1;
+      else if (row.status === "Project ID Not Found") counts.notFound += 1;
+      return counts;
+    },
+    { matches: 0, mismatches: 0, notFound: 0 }
+  );
+  const notificationDrafts = completenessRows.filter(
+    (row) => row.status === "Mismatch" || row.status === "Project ID Not Found"
+  );
 
   return (
     <div className="app-shell">
@@ -223,6 +244,7 @@ export default function ComparePage() {
             loading={readingColumns.client}
             error={columnsError.client}
           />
+
         </div>
       </section>
 
@@ -258,7 +280,28 @@ export default function ComparePage() {
         </div>
       )}
 
-      {result && (
+      {result && result.stage === "completeness" && (
+        <section className="results-section" aria-label="Data completeness">
+          <div className="alert alert--error" role="alert">
+            <strong>Comparison stopped.</strong> At least one file has no
+            rows for its detected reporting period, or its reporting period
+            could not be determined.
+          </div>
+          {["attendance", "client"].map((side) => {
+            const c = result.completeness?.[side];
+            if (!c) return null;
+            const label = side === "attendance" ? "iLink Timesheet" : "Client File";
+            return (
+              <div key={side}>
+                <h3>{label}</h3>
+                {c.error && <p className="alert alert--error">{c.error}</p>}
+              </div>
+            );
+          })}
+        </section>
+      )}
+
+      {result && result.stage !== "completeness" && (
         <section className="results-section" aria-label="Comparison results">
           {!loading && (
             <div className="alert alert--success" role="status">
@@ -266,9 +309,46 @@ export default function ComparePage() {
             </div>
           )}
 
+          <div className="stage1-section">
+            <div className="completeness-summary-row">
+              <p role="status">
+                Monthly Project ID Completeness: {completenessCounts.matches} Match |{" "}
+                {completenessCounts.mismatches} Mismatch | {completenessCounts.notFound} Not Found
+              </p>
+              <button
+                type="button"
+                className="btn btn--secondary"
+                disabled={notificationDrafts.length === 0}
+                onClick={() => setDraftsVisible((visible) => !visible)}
+              >
+                {draftsVisible ? "Hide Notification Drafts" : "Generate Notification Drafts"}
+              </button>
+            </div>
+            {draftsVisible && notificationDrafts.length > 0 && (
+              <div className="notification-drafts">
+                {notificationDrafts.map((draft) => {
+                  const hasValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.email || "");
+                  const mailto = hasValidEmail
+                    ? `mailto:${draft.email}?subject=${encodeURIComponent(draft.email_subject)}&body=${encodeURIComponent(draft.email_body)}`
+                    : null;
+                  return (
+                    <article className="notification-draft" key={draft.project_id}>
+                      <h3>Project ID {draft.project_id}</h3>
+                      <p><strong>Employee Name:</strong> {draft.employee_name || "Not available"}</p>
+                      <p><strong>Email:</strong> {hasValidEmail ? draft.email : "No email address found in iLink."}</p>
+                      <p><strong>Subject:</strong> {draft.email_subject}</p>
+                      <p className="notification-draft__body"><strong>Body:</strong>{" "}{draft.email_body}</p>
+                      {mailto && <a href={mailto}>Open draft in email client</a>}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <div className="results-header">
             <div>
-              <h2>Results</h2>
+              <h2>Level 2 — iLink vs Client (Billable Hours)</h2>
               <p className="results-subtitle">
                 {result.summary.total_records_compared} employee records compared ·{" "}
                 {result.summary.matches} matched ·{" "}

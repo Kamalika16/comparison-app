@@ -28,7 +28,6 @@ export async function compareFiles(
   if (clientKeyColumn) {
     formData.append("client_key_column", clientKeyColumn);
   }
-
   const response = await axios.post(`${API_BASE_URL}/api/compare`, formData);
   return response.data;
 }

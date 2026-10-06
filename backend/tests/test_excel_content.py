@@ -7,7 +7,14 @@ tests lock in the fuzzy name-matching fallback that disambiguates by column
 NAME in that case -- including typos, since end users type headers however
 they type them.
 """
-from app.services.excel_loader import detect_hours_column
+from openpyxl import load_workbook
+
+from app.services.excel_loader import (
+    detect_billable_column,
+    detect_hours_column,
+    detect_non_billable_column,
+)
+from app.services.report_writer import write_report
 
 
 def _records(columns: dict) -> list[dict]:
@@ -59,6 +66,24 @@ class TestFallsBackToErrorWhenGenuinelyAmbiguous:
         except ValueError as e:
             assert "found 2" in str(e)
 
+
+class TestBillableSplitDetection:
+    def test_detects_distinct_billable_and_non_billable_columns(self):
+        records = _records({
+            "Billable Hours": 30,
+            "Non-Billable Hours": 10,
+            "Rate": 50,
+        })
+
+        assert detect_billable_column(records) == "Billable Hours"
+        assert detect_non_billable_column(records) == "Non-Billable Hours"
+
+    def test_does_not_reuse_billable_column_as_non_billable(self):
+        records = _records({"Billable Hours": 40, "Rate": 50})
+
+        assert detect_billable_column(records) == "Billable Hours"
+        assert detect_non_billable_column(records) is None
+
     def test_genuine_tie_between_two_equally_hour_like_names(self):
         row = {"Billable Hours": 8, "Total Hours": 8}
         try:
@@ -78,3 +103,36 @@ class TestFallsBackToErrorWhenGenuinelyAmbiguous:
             assert False, "expected ValueError"
         except ValueError as e:
             assert "found 2" in str(e)
+
+
+def test_report_completeness_sheet_uses_project_monthly_columns(tmp_path):
+    report_path = tmp_path / "report.xlsx"
+    write_report(
+        {
+            "summary": {},
+            "mismatches": [],
+            "matched": [],
+            "stage1": {},
+            "completeness": {
+                "projects": [{
+                    "project_id": "H324716",
+                    "employee_name": "A. Employee",
+                    "client_billable_hours": 40,
+                    "ilink_total_hours": 40,
+                    "status": "Match",
+                    "reason": "Monthly totals match.",
+                }],
+            },
+        },
+        str(report_path),
+    )
+
+    workbook = load_workbook(report_path, read_only=True)
+    sheet = workbook["Completeness"]
+    assert [cell.value for cell in sheet[1]] == [
+        "Project ID", "Employee Name", "Client Billable Hours",
+        "iLink Hours", "Status", "Reason",
+    ]
+    assert [cell.value for cell in sheet[2]] == [
+        "H324716", "A. Employee", 40, 40, "Match", "Monthly totals match.",
+    ]

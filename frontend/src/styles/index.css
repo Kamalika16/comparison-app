@@ -102,7 +102,8 @@ select {
 
 @media (max-width: 768px) {
   .upload-section {
-    grid-template-columns: 1fr; /* stack the two cards vertically */
+    grid-template-columns: 1fr;
+    /* stack the two cards vertically */
   }
 }
 
@@ -110,7 +111,8 @@ select {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  min-width: 0; /* let inner content shrink instead of overflowing */
+  min-width: 0;
+  /* let inner content shrink instead of overflowing */
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
@@ -145,9 +147,7 @@ select {
   padding: 9px 32px 9px 10px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
-  background: var(--color-surface)
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364708a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E")
-    no-repeat right 10px center;
+  background: var(--color-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364708a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 10px center;
   appearance: none;
   font-size: 13px;
   color: var(--color-text);
@@ -199,11 +199,13 @@ select {
 
 .file-uploader--active {
   border-color: var(--color-primary);
-  background: var(--color-primary-tint); /* file dragged over the dropzone */
+  background: var(--color-primary-tint);
+  /* file dragged over the dropzone */
 }
 
 .file-uploader--filled {
-  border-style: solid; /* a file is selected */
+  border-style: solid;
+  /* a file is selected */
   border-color: #b3ddc6;
   background: #f5fbf7;
 }
@@ -383,6 +385,55 @@ select {
   margin-top: 24px;
 }
 
+.completeness-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.completeness-summary-row p {
+  margin: 0;
+}
+
+.completeness-summary-row .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.notification-drafts {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.notification-draft {
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.notification-draft h3,
+.notification-draft p {
+  margin: 0 0 8px;
+}
+
+.notification-draft h3 {
+  font-size: 14px;
+}
+
+.notification-draft__body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notification-draft a {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
 .results-header {
   display: flex;
   align-items: flex-start;
@@ -445,10 +496,21 @@ select {
   padding: 13px 16px;
 }
 
-.summary-card--good { border-top-color: var(--color-good); }
-.summary-card--warn { border-top-color: #d9a400; }
-.summary-card--bad { border-top-color: var(--color-bad); }
-.summary-card--info { border-top-color: var(--color-info); }
+.summary-card--good {
+  border-top-color: var(--color-good);
+}
+
+.summary-card--warn {
+  border-top-color: #d9a400;
+}
+
+.summary-card--bad {
+  border-top-color: var(--color-bad);
+}
+
+.summary-card--info {
+  border-top-color: var(--color-info);
+}
 
 .summary-card__value {
   font-size: 22px;
@@ -473,7 +535,8 @@ select {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
   margin-bottom: 14px;
-  overflow: hidden; /* keeps the rounded corners over the scroll area */
+  overflow: hidden;
+  /* keeps the rounded corners over the scroll area */
 }
 
 .result-group__head {
@@ -514,7 +577,8 @@ select {
 
 .mismatch-table {
   width: 100%;
-  min-width: 620px; /* forces tidy horizontal scrolling on narrow screens */
+  min-width: 620px;
+  /* forces tidy horizontal scrolling on narrow screens */
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -584,18 +648,52 @@ select {
 }
 
 /* LLM-path severities */
-.severity-badge--match { background: var(--color-good-tint); color: var(--color-good); }
-.severity-badge--minor { background: var(--color-warn-tint); color: var(--color-warn); }
-.severity-badge--major { background: var(--color-bad-tint); color: var(--color-bad); }
+.severity-badge--match {
+  background: var(--color-good-tint);
+  color: var(--color-good);
+}
+
+.severity-badge--minor {
+  background: var(--color-warn-tint);
+  color: var(--color-warn);
+}
+
+.severity-badge--major {
+  background: var(--color-bad-tint);
+  color: var(--color-bad);
+}
+
 .severity-badge--missing_attendance,
-.severity-badge--missing_client_work { background: #fdeadd; color: #a14e0e; }
-.severity-badge--review { background: var(--color-info-tint); color: var(--color-info); }
+.severity-badge--missing_client_work {
+  background: #fdeadd;
+  color: #a14e0e;
+}
+
+.severity-badge--review {
+  background: var(--color-info-tint);
+  color: var(--color-info);
+}
 
 /* Deterministic path severities (HIGH / MEDIUM / LOW) */
-.severity-badge--HIGH { background: var(--color-bad-tint); color: var(--color-bad); }
-.severity-badge--MEDIUM { background: var(--color-warn-tint); color: var(--color-warn); }
-.severity-badge--LOW { background: #e8edf6; color: #44507a; }
-.severity-badge--REVIEW { background: var(--color-info-tint); color: var(--color-info); }
+.severity-badge--HIGH {
+  background: var(--color-bad-tint);
+  color: var(--color-bad);
+}
+
+.severity-badge--MEDIUM {
+  background: var(--color-warn-tint);
+  color: var(--color-warn);
+}
+
+.severity-badge--LOW {
+  background: #e8edf6;
+  color: #44507a;
+}
+
+.severity-badge--REVIEW {
+  background: var(--color-info-tint);
+  color: var(--color-info);
+}
 
 /* ---------- Success / empty state ---------- */
 
@@ -655,7 +753,8 @@ select {
   }
 
   .compare-actions .btn {
-    width: 100%; /* full-width primary action on phones */
+    width: 100%;
+    /* full-width primary action on phones */
   }
 
   .summary-cards {
@@ -663,7 +762,8 @@ select {
   }
 
   .result-group__desc {
-    display: none; /* keep group headers compact */
+    display: none;
+    /* keep group headers compact */
   }
 
   .reason-cell {

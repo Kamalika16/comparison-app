@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -77,7 +76,6 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
     mismatches = result.get("mismatches", [])
     matched = result.get("matched", [])
     meta = meta or {}
-    headers = detail_headers(meta)
 
     wb = Workbook()
 
@@ -106,32 +104,96 @@ def write_report(result: dict, output_path: str, meta: dict | None = None) -> Pa
     ws_summary.column_dimensions["A"].width = 32
     ws_summary.column_dimensions["B"].width = 34
 
-    # --- Details sheet (matches and mismatches, mirroring the UI table) ---
+    # --- Details sheet: ONE combined final list -- Level 1 mismatches,
+    # Level 2 mismatches, and Level 2 matches all together, per the
+    # original spec ("final list will have level 1 mismatched and level 2
+    # mismatched and matched employees too"). Replaces the separate
+    # Details + Expected Hours sheets from the earlier version.
+    stage1 = result.get("stage1") or {}
+    combined_headers = [
+        "Employee ID", "Employee Name",
+        "Billable Hours", "Non-Billable Hours", "Level 1 Total",
+        "Level 1 Expected Total", "Level 1 Status",
+        "iLink Timesheet Hours", "Client Billable Hours (Level 2)",
+        "Level 2 Difference", "Level 2 Status",
+        "Overall Status", "Reason",
+    ]
     ws_details = wb.create_sheet("Details")
-    ws_details.append(headers)
+    ws_details.append(combined_headers)
     for cell in ws_details[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center")
 
-    for m in mismatches + matched:
+    # Level 1 mismatches never reach Level 2 -- no iLink-side data exists
+    # for them, those columns are left blank rather than a fabricated 0.
+    for row in stage1.get("mismatched", []):
         ws_details.append([
-            m.get("employee_name", "") or "",
-            m.get("id", m.get("employee_id", "")) or "",
+            row.get("employee_id", ""), row.get("employee_name", ""),
+            row.get("billable_hours"), row.get("non_billable_hours"),
+            row.get("total_hours"), row.get("expected_total_hours"),
+            "Mismatched", "", "", "", "",
+            "Level 1 Mismatch",
+            f"Level 1: billable+non-billable total {row.get('total_hours')} vs "
+            f"expected {row.get('expected_total_hours')}, "
+            f"difference {row.get('difference')}.",
+        ])
+        for cell in ws_details[ws_details.max_row]:
+            cell.fill = SEVERITY_FILL["MEDIUM"]
+
+    # Level 2 rows -- only employees who matched Level 1 reach here, so
+    # their Level 1 figures are looked up (all should be found).
+    stage1_matched_lookup = {
+        row.get("employee_id"): row for row in stage1.get("matched", [])
+    }
+    for m in result.get("mismatches", []) + result.get("matched", []):
+        emp_id = m.get("id", m.get("employee_id", ""))
+        s1 = stage1_matched_lookup.get(emp_id, {})
+        is_match = str(m.get("status", "")).lower().startswith("match")
+        ws_details.append([
+            emp_id, m.get("employee_name", "") or s1.get("employee_name", ""),
+            s1.get("billable_hours"), s1.get("non_billable_hours"),
+            s1.get("total_hours"), s1.get("expected_total_hours"),
+            "Matched",
             m.get("file1_total_hours", m.get("company_hours")),
             m.get("file2_hours", m.get("client_hours")),
             m.get("difference", _difference(m)),
             m.get("status", "Mismatch"),
+            "Matched" if is_match else "Level 2 Mismatch",
             m.get("reason", "") or "",
         ])
-        fill = SEVERITY_FILL.get(m.get("severity"))
-        if fill:
+        if not is_match:
+            fill = SEVERITY_FILL.get(m.get("severity"), SEVERITY_FILL.get("MEDIUM"))
             for cell in ws_details[ws_details.max_row]:
                 cell.fill = fill
 
     ws_details.freeze_panes = "A2"
     ws_details.auto_filter.ref = ws_details.dimensions
-    _autosize_columns(ws_details, headers)
+    _autosize_columns(ws_details, combined_headers)
+
+    # --- Completeness sheet (Stage 0) ---
+    completeness = result.get("completeness")
+    if completeness:
+        ws_comp = wb.create_sheet("Completeness")
+        comp_headers = [
+            "Project ID", "Employee Name", "Client Billable Hours",
+            "iLink Hours", "Status", "Reason",
+        ]
+        ws_comp.append(comp_headers)
+        for cell in ws_comp[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+        for row in completeness.get("projects", []):
+            ws_comp.append([
+                row.get("project_id", ""),
+                row.get("employee_name", ""),
+                row.get("client_billable_hours", ""),
+                row.get("ilink_total_hours", ""),
+                row.get("status", ""),
+                row.get("reason", ""),
+            ])
+        ws_comp.auto_filter.ref = ws_comp.dimensions
+        _autosize_columns(ws_comp, comp_headers)
 
     output_path = Path(output_path)
     wb.save(output_path)
